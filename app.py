@@ -1772,9 +1772,13 @@ def main():
                     last_chest_open_total[chest_to_open] = max(1, next_cd)
                     chest_delays[chest_to_open] = get_chest_delay()
                     other_chest = "right" if chest_to_open == "left" else "left"
-                    diff = abs((left_ts + chest_delays["left"] * 1000) - (right_ts + chest_delays["right"] * 1000)) // 1000
+                    other_ts = right_ts if chest_to_open == "left" else left_ts
+                    this_target = (left_ts if chest_to_open == "left" else right_ts) + (chest_delays[chest_to_open] * 1000)
+                    other_target = other_ts + (chest_delays[other_chest] * 1000)
+                    diff = abs(this_target - other_target) // 1000
                     if diff < min_chest_interval_sec:
                         chest_delays[other_chest] += int(min_chest_interval_sec - diff)
+                    time.sleep(min_chest_interval_sec)
 
                     last_claim_msg = f"{place_name} (+{consume:,} clicks) -> Balance: {total_clicks - total_consume:,} clicks"
 
