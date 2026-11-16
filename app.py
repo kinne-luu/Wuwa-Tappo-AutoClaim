@@ -1275,7 +1275,250 @@ def find_wuwa_tappo_exe() -> str:
     return None
 
 
+POLICY_KEY = r"SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+CDP_PORT = 19222
+pet_sync_enabled = True
+
+
+def is_admin() -> bool:
+    """Check if the process is running with Administrator privileges."""
+    if os.name != "nt":
+        return True
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def ensure_admin():
+    """Prompt Windows UAC dialog to request Administrator privileges if not elevated."""
+    if os.name == "nt" and not is_admin():
+        logger.info("Requesting Administrator elevation via UAC...")
+        args_str = " ".join([f'"{a}"' for a in sys.argv[1:]])
+        if getattr(sys, "frozen", False):
+            params = args_str if args_str else None
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, params, WORKSPACE_DIR, 1
+            )
+        else:
+            script = os.path.abspath(__file__)
+            params = f'"{script}" {args_str}'.strip()
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, params, WORKSPACE_DIR, 1
+            )
+        sys.exit(0)
+
+
+def setup_pet_sync():
+    """Apply WebView2 debugging registry policy ONLY for WuwaTappo.exe."""
+    if os.name != "nt":
+        return
+    arg = f"--remote-debugging-port={CDP_PORT}"
+    try:
+        key_lm = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY)
+        winreg.SetValueEx(key_lm, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
+        try:
+            winreg.DeleteValue(key_lm, "*")
+        except Exception:
+            pass
+        winreg.CloseKey(key_lm)
+    except Exception as e:
+        logger.debug(f"Failed to write HKLM policy: {e}")
+
+    try:
+        key_cu = winreg.CreateKey(winreg.HKEY_CURRENT_USER, POLICY_KEY)
+        winreg.SetValueEx(key_cu, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
+        try:
+            winreg.DeleteValue(key_cu, "*")
+        except Exception:
+            pass
+        winreg.CloseKey(key_cu)
+    except Exception as e:
+        logger.debug(f"Failed to write HKCU policy: {e}")
+
+
+def cleanup_registry_policy():
+    """Remove all WebView2 debugging registry keys (HKLM and HKCU) for a zero footprint."""
+    if os.name != "nt":
+        return
+    try:
+        key_lm = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key_lm, "WuwaTappo.exe")
+        winreg.DeleteValue(key_lm, "*")
+        winreg.CloseKey(key_lm)
+    except Exception:
+        pass
+    try:
+        winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY)
+    except Exception:
+        pass
+
+    try:
+        key_cu = winreg.OpenKey(winreg.HKEY_CURRENT_USER, POLICY_KEY, 0, winreg.KEY_SET_VALUE)
+        winreg.DeleteValue(key_cu, "WuwaTappo.exe")
+        winreg.DeleteValue(key_cu, "*")
+        winreg.CloseKey(key_cu)
+    except Exception:
+        pass
+    try:
+        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, POLICY_KEY)
+    except Exception:
+        pass
+
+
+def is_cdp_ready() -> bool:
+    """Check if WebView2 CDP debugging port is accessible."""
+    try:
+        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=0.5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+def restart_pet_if_needed():
+    """Automatically activate CDP Port on Wuwa Tappo so pet UI stays in sync."""
+    global pet_sync_enabled
+    if not is_app_running():
+        return
+    if is_cdp_ready():
+        pet_sync_enabled = True
+        return
+
+    c = Color
+    pet_sync_enabled = True
+    print(f"\n  {c.PASTEL_CYAN}[*] Synchronizing with Wuwa Tappo (Activating Pet Live Sync)...{c.RESET}")
+    logger.info(f"Restarting Wuwa Tappo to bind CDP port {CDP_PORT}...")
+    app_exe = None
+    tappo_pids = set()
+    my_pid = os.getpid()
+
+    for p in psutil.process_iter(["pid", "name", "exe"]):
+        try:
+            if p.info["pid"] == my_pid:
+                continue
+            name = (p.info["name"] or "").lower()
+            if name == "wuwatappo.exe":
+                tappo_pids.add(p.info["pid"])
+                if p.info.get("exe") and not app_exe:
+                    app_exe = p.info["exe"]
+                p.kill()
+        except Exception:
+            pass
+
+    for p in psutil.process_iter(["pid", "name", "ppid", "cmdline"]):
+        try:
+            name = (p.info["name"] or "").lower()
+            cmd = " ".join(p.info["cmdline"] or []).lower()
+            if "msedgewebview2" in name:
+                if p.info["ppid"] in tappo_pids or "com.kuro.wuwatappo" in cmd:
+                    p.kill()
+        except Exception:
+            pass
+
+    time.sleep(1.2)
+
+    if not app_exe or not os.path.exists(app_exe):
+        app_exe = find_wuwa_tappo_exe()
+
+    if app_exe and os.path.exists(app_exe):
+        try:
+            env = os.environ.copy()
+            env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={CDP_PORT}"
+            cwd = os.path.dirname(app_exe)
+            subprocess.Popen([app_exe], env=env, cwd=cwd)
+            for _ in range(8):
+                time.sleep(1)
+                if is_cdp_ready():
+                    cleanup_registry_policy()
+                    print(f"  {c.PASTEL_GREEN}[+] Wuwa Tappo Pet Live Sync connected!{c.RESET}\n")
+                    logger.info(f"Wuwa Tappo Pet CDP port {CDP_PORT} initialized successfully!")
+                    break
+        except Exception as e:
+            cleanup_registry_policy()
+            logger.debug(f"Could not relaunch Wuwa Tappo: {e}")
+
+
+def sync_pet_ui(gross: int = 0, consumed: int = 0, left_ts: int = 0, right_ts: int = 0) -> bool:
+    """Synchronize pet state via CDP:
+    Inject JS directly into Vue/Pinia store for zero flicker and instant update.
+    Fallbacks to Page.reload if store injection fails.
+    """
+    if not is_app_running() or not is_cdp_ready():
+        return False
+    try:
+        import websockets
+
+        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json", timeout=1.0)
+        targets = resp.json()
+
+        patch_js = f"""
+        (() => {{
+            try {{
+                const app = document.querySelector('#app');
+                const pinia = app?.__vue_app__?.config?.globalProperties?.$pinia;
+                const store = pinia?._s?.get('GlobalState');
+                if (store && store.userInfo && typeof store.$patch === 'function') {{
+                    const patchData = {{
+                        userInfo: {{
+                            ...store.userInfo,
+                            total_click_count: {gross},
+                            total_click_consume: {consumed}
+                        }}
+                    }};
+                    if ({left_ts} > 0) patchData.userInfo.left_treasure_chest = {left_ts};
+                    if ({right_ts} > 0) patchData.userInfo.right_treasure_chest = {right_ts};
+                    store.$patch(patchData);
+                    return true;
+                }}
+            }} catch (e) {{}}
+            return false;
+        }})();
+        """
+
+        synced = False
+        for target in targets:
+            url = target.get("url", "").lower()
+            title = target.get("title", "").lower()
+            ws_url = target.get("webSocketDebuggerUrl")
+
+            if ws_url and ("tauri" in url or "wuwatappo" in title or "kuro" in url or "localhost" in url):
+                async def _send(endpoint):
+                    async with websockets.connect(endpoint, close_timeout=2) as ws:
+                        if gross > 0 or consumed > 0:
+                            eval_cmd = {
+                                "id": 1,
+                                "method": "Runtime.evaluate",
+                                "params": {"expression": patch_js, "returnByValue": True},
+                            }
+                            await ws.send(json.dumps(eval_cmd))
+                            res_raw = await asyncio.wait_for(ws.recv(), timeout=1.5)
+                            res = json.loads(res_raw)
+                            val = res.get("result", {}).get("result", {}).get("value")
+                            if val is True:
+                                return True
+
+                        reload_cmd = {"id": 2, "method": "Page.reload", "params": {"ignoreCache": True}}
+                        await ws.send(json.dumps(reload_cmd))
+                        return True
+
+                synced = asyncio.run(_send(ws_url)) or synced
+
+        if synced:
+            logger.info(f"[Sync] Wuwa Tappo Pet UI synchronized successfully via CDP port {CDP_PORT}!")
+        return synced
+    except Exception as e:
+        logger.debug(f"CDP sync error: {e}")
+        return False
+
+
+def notify_app_refresh(gross: int = 0, consumed: int = 0, left_ts: int = 0, right_ts: int = 0):
+    """Automatically refresh Pet state via DevTools CDP (Pinia store patch with reload fallback)."""
+    if is_app_running() and is_cdp_ready():
+        sync_pet_ui(gross=gross, consumed=consumed, left_ts=left_ts, right_ts=right_ts)
+
+
 def cleanup_app_exit():
+    cleanup_registry_policy()
     try:
         sys.stdout.write("\033[?25h")
         sys.stdout.flush()
@@ -1563,12 +1806,14 @@ def main():
         print("\n".join(lines))
         sys.exit(0)
 
+    ensure_admin()
+    setup_pet_sync()
     init_terminal()
     render_banner()
+    restart_pet_if_needed()
+    cleanup_registry_policy()
 
-    if is_app_running():
-        print(f"  {Color.PASTEL_YELLOW}[!] Note: Wuwa Tappo is currently running.{Color.RESET}")
-        print(f"      {Color.PASTEL_GRAY}For 100% stable claiming and zero desync, you can freely close Wuwa Tappo.{Color.RESET}\n")
+
 
     token, cid, webhook_url, token_src, cid_src, show_window_cfg, min_delay_sec, max_delay_sec, min_chest_interval_sec = load_config(cli_args)
     client = WuwaTappoClient(token, cid)
@@ -1775,6 +2020,15 @@ def main():
                         left_wait_sec=max(0, int((left_ts - current_server_ts()) / 1000)),
                         right_wait_sec=max(0, int((right_ts - current_server_ts()) / 1000)),
                     )
+
+                    # Đồng bộ tức thì số clicks và giờ rương lên con Pet Desktop qua CDP
+                    if is_app_running():
+                        notify_app_refresh(
+                            gross=total_clicks,
+                            consumed=total_consume,
+                            left_ts=left_ts,
+                            right_ts=right_ts,
+                        )
 
 
 
