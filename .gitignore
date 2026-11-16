@@ -1,0 +1,26 @@
+# Sensitive & Configuration
+config.json
+*.log
+auto_claim.log
+
+# Build & Binaries
+build/
+dist/
+*.spec
+*.exe
+!tool/GetToken.exe
+
+# Python Cache & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+venv/
+.venv/
+env/
+
+# IDE & OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
