@@ -693,6 +693,15 @@ def exit_from_tray(icon=None, item=None):
     os._exit(0)
 
 
+def open_log_file(icon=None, item=None):
+    """Open the auto_claim.log file with the system default viewer (Notepad)."""
+    try:
+        if os.name == "nt" and os.path.exists(LOG_FILE):
+            os.startfile(LOG_FILE)
+    except Exception:
+        pass
+
+
 def init_tray():
 
     global tray_icon
@@ -702,6 +711,7 @@ def init_tray():
             toggle_window,
             default=True,
         ),
+        pystray.MenuItem("View Logs", open_log_file),
         pystray.MenuItem(
             "Start with Windows",
             toggle_autostart,
@@ -810,6 +820,54 @@ def prompt_settings():
             global_update_view_fn(in_place=False)
 
 
+def show_logs_view():
+    """Display a clean terminal viewer of the most recent log entries with an option to open full log in Notepad."""
+    global is_setting_active
+    if is_setting_active:
+        return
+    is_setting_active = True
+    c = Color
+    try:
+        clear_terminal()
+        print(f"\n  {c.BOLD}{c.PASTEL_CYAN}─── [L] RECENT LOG ENTRIES ───{c.RESET}")
+        print(f"  {c.PASTEL_GRAY}Press [O] to open full log in Notepad │ Any other key to return to Dashboard{c.RESET}\n")
+
+        lines = []
+        if os.path.exists(LOG_FILE):
+            try:
+                with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except Exception:
+                pass
+
+        recent = lines[-16:] if lines else ["  (No logs recorded yet)\n"]
+        for l in recent:
+            l_str = l.strip()
+            if "[INFO]" in l_str:
+                print(f"  {c.PASTEL_GREEN}{l_str}{c.RESET}")
+            elif "[WARN" in l_str:
+                print(f"  {c.PASTEL_YELLOW}{l_str}{c.RESET}")
+            elif "[ERROR]" in l_str or "[DEBUG]" in l_str:
+                print(f"  {c.PASTEL_PINK}{l_str}{c.RESET}")
+            else:
+                print(f"  {c.PASTEL_GRAY}{l_str}{c.RESET}")
+
+        print(f"\n  {c.PASTEL_CYAN}[O]{c.RESET} Open full log in Notepad      {c.PASTEL_CYAN}[Any Key]{c.RESET} Return to Dashboard\n")
+
+        import msvcrt
+        while True:
+            if msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch in (b'o', b'O'):
+                    open_log_file()
+                break
+            time.sleep(0.05)
+    finally:
+        is_setting_active = False
+        if global_update_view_fn:
+            global_update_view_fn(in_place=False)
+
+
 def console_input_loop():
     global running_flag
     if os.name != "nt":
@@ -823,6 +881,8 @@ def console_input_loop():
                     hide_window(notify_user=True)
                 elif ch in (b's', b'S'):
                     prompt_settings()
+                elif ch in (b'l', b'L'):
+                    show_logs_view()
                 elif ch in (b'q', b'Q'):
                     running_flag = False
                     cleanup_app_exit()
@@ -1384,9 +1444,7 @@ def restart_pet_if_needed():
         pet_sync_enabled = True
         return
 
-    c = Color
     pet_sync_enabled = True
-    print(f"\n  {c.PASTEL_CYAN}[*] Synchronizing with Wuwa Tappo (Activating Pet Live Sync)...{c.RESET}")
     logger.info(f"Restarting Wuwa Tappo to bind CDP port {CDP_PORT}...")
     app_exe = None
     tappo_pids = set()
@@ -1430,7 +1488,6 @@ def restart_pet_if_needed():
                 time.sleep(1)
                 if is_cdp_ready():
                     cleanup_registry_policy()
-                    print(f"  {c.PASTEL_GREEN}[+] Wuwa Tappo Pet Live Sync connected!{c.RESET}\n")
                     logger.info(f"Wuwa Tappo Pet CDP port {CDP_PORT} initialized successfully!")
                     break
         except Exception as e:
@@ -1687,7 +1744,7 @@ def build_dashboard_lines(
     )
     lines.append(f"  {dots}")
     lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« Zani is working hard diligently! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
-    lines.append(f"  {c.PASTEL_GRAY}[H] Hide to Tray    [S] Settings    [Q] Quit{c.RESET}")
+    lines.append(f"  {c.PASTEL_GRAY}[H] Hide to Tray    [S] Settings    [L] View Logs    [Q] Quit{c.RESET}")
     lines.append("")
 
     return lines
@@ -1997,7 +2054,7 @@ def main():
 
                     item_type = "Character" if asset.lower().startswith("role") else ("Accessory" if asset.lower().startswith("accessory") else ("Emote" if asset.lower().startswith("emote") else "Item"))
                     rarity_str = rarity.capitalize() if rarity else "Common"
-                    last_claim_msg = f"{place_name}: {asset} ({item_type} - {rarity_str}) -> Balance: {total_clicks - total_consume:,} clicks"
+                    last_claim_msg = f"{place_name} (+{consume:,} clicks) │ Press [L] for Details"
 
                     logger.info(
                         f"SUCCESS #{chest_count}: Claimed {place_name}! Reward: {asset} ({item_type} - {rarity_str}) | "
