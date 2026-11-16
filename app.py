@@ -1011,7 +1011,7 @@ def send_discord_webhook(
     }
     embed_color = color_map.get(rarity_lower, 0x5865F2)
     image_url = get_asset_url(asset_name)
-    place_label = "Left Chest" if place == "left" else "Right Chest"
+    place_label = "Chest #1" if place == "left" else "Chest #2"
 
     embed = {
         "title": f"{place_label} Claimed Successfully!",
@@ -1406,13 +1406,13 @@ def build_dashboard_lines(
         right_status = f"{c.WHITE}{ts_to_str(right_ts)}{c.RESET} {c.PASTEL_YELLOW}in {format_duration(orig_wait_right)}{c.RESET} {c.PASTEL_GRAY}(+{jitter_right}s jitter){c.RESET}"
 
     if left_ts <= right_ts:
-        next_target = "Left Chest"
+        next_target = "Chest #1"
         next_orig_ts = left_ts
         next_orig_wait = orig_wait_left
         next_jitter = jitter_left
         next_wait_sec = wait_left
     else:
-        next_target = "Right Chest"
+        next_target = "Chest #2"
         next_orig_ts = right_ts
         next_orig_wait = orig_wait_right
         next_jitter = jitter_right
@@ -1460,8 +1460,8 @@ def build_dashboard_lines(
     # Block 3: Chest Schedule & Progress (Pastel Blue bar)
     lines.append(row(c.PASTEL_BLUE, "Next Target", next_target_val))
     lines.append(row(c.PASTEL_BLUE, "Progress", bar_str))
-    lines.append(row(c.PASTEL_BLUE, "Left Chest", left_status))
-    lines.append(row(c.PASTEL_BLUE, "Right Chest", right_status))
+    lines.append(row(c.PASTEL_BLUE, "Chest #1", left_status))
+    lines.append(row(c.PASTEL_BLUE, "Chest #2", right_status))
 
     # Block 4: Recent Claim Activity (Pastel Green bar)
     if last_claim_msg:
@@ -1739,7 +1739,7 @@ def main():
                 if target_click < min_needed:
                     target_click = min_needed
 
-                place_name = "Left Chest" if chest_to_open == "left" else "Right Chest"
+                place_name = "Chest #1" if chest_to_open == "left" else "Chest #2"
                 update_view(action=f"Claiming {place_name} - +{click_gain} clicks")
                 sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
                 sys.stdout.flush()
@@ -1831,7 +1831,7 @@ def main():
             wait_left = max(0, int((target_left_ts - now) / 1000))
             wait_right = max(0, int((target_right_ts - now) / 1000))
             next_wait = min(wait_left, wait_right)
-            next_name = "Left Chest" if wait_left <= wait_right else "Right Chest"
+            next_name = "Chest #1" if wait_left <= wait_right else "Chest #2"
             chest_key = "left" if wait_left <= wait_right else "right"
             total_duration = last_chest_open_total.get(chest_key, 1800)
 

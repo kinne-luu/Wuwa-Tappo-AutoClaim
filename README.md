@@ -1,5 +1,9 @@
 # Wuwa Tappo Auto Claim
 
+<p align="center">
+  <img src="media/image/UI.png" alt="Wuwa Tappo Auto Claim Terminal UI" width="700">
+</p>
+
 [Tiếng Việt](#tiếng-việt) | [English](#english)
 
 ---
