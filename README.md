@@ -1,4 +1,4 @@
-# Wuwa Tappo Auto Claim (Zani Edition) 🐱✨
+# Wuwa Tappo Auto Claim
 
 [Tiếng Việt](#tiếng-việt) | [English](#english)
 
@@ -6,85 +6,72 @@
 
 ## Tiếng Việt
 
-Công cụ tự động nhận rương thông minh cho **Wuwa Tappo** trên Windows với giao diện Fastfetch phong cách terminal hiện đại và hỗ trợ khay hệ thống (System Tray).
+Tool tự động nhận rương cho **Wuwa Tappo** trên Windows. Chạy trong terminal, có thể thu xuống khay hệ thống.
 
-### ✨ Tính năng nổi bật
-- **Fastfetch Terminal UI:** Giao diện trực quan, bảng màu pastel, thanh tiến trình mở rương, hiển thị chính xác mốc giờ gốc của server và độ trễ ngẫu nhiên (+jitter).
-- **Tự động nhận diện Token / CID:** Tự động trích xuất an toàn từ WebView2 cookies hoặc bộ nhớ RAM của Wuwa Tappo.
-- **Tự động phát hiện Game:** Quét thông minh qua tiến trình, Windows Registry và toàn bộ ổ đĩa máy tính, chạy trơn tru trên mọi máy khác nhau.
-- **Cơ chế chống phát hiện:**
-  - Khoảng thời gian trễ ngẫu nhiên (Jitter Delay) sau khi rương xuất hiện.
-  - Giãn cách tối thiểu giữa 2 lần mở rương liên tiếp (`interval`).
-  - Gia số click ngẫu nhiên mô phỏng người dùng thật.
-- **Menu cài đặt nhanh [S]:** Bấm phím `[S]` ngay trong terminal để chọn và đổi riêng từng cài đặt mà không cần tắt app.
-- **System Tray:** Thu nhỏ cửa sổ xuống khay hệ thống bằng phím `[H]` hoặc click nút thu nhỏ của Windows.
+### Tính năng
+- Tự lấy Token / CID từ cookies WebView2 hoặc bộ nhớ của Wuwa Tappo.
+- Tự tìm game qua tiến trình đang chạy, Registry và các ổ đĩa.
+- Có độ trễ ngẫu nhiên sau khi rương xuất hiện và khoảng cách tối thiểu giữa 2 lần mở (`interval`) để tránh bị phát hiện.
+- Đổi cài đặt ngay khi đang chạy, không cần tắt app.
 
-### 🚀 Hướng dẫn sử dụng
-1. **Cài đặt thư viện (nếu chạy mã nguồn Python):**
-   ```cmd
-   pip install -r requirements.txt
-   ```
-2. **Khởi chạy:**
-   - Nhấp đúp vào `run.bat` (tự động ưu tiên file `.exe` nếu có sẵn, hoặc chạy qua Python).
-   - Hoặc chạy trực tiếp:
-     ```cmd
-     python app.py
-     ```
-3. **Tham số dòng lệnh (CLI):**
-   ```cmd
-   python app.py --status                          # Xem thông tin tài khoản rồi thoát
-   python app.py --min-delay 5 --max-delay 30 --interval 15   # Tùy chỉnh độ trễ
-   python app.py --tray                            # Khởi động ẩn ngay dưới khay hệ thống
-   ```
-4. **Phím tắt trong Terminal:**
-   - `[H]`: Thu nhỏ xuống System Tray.
-   - `[S]`: Mở menu cài đặt nhanh.
-   - `[Q]`: Thoát an toàn.
+### Cách dùng
+Cài thư viện (nếu chạy bằng mã nguồn):
 
-5. **Đóng gói file .exe:**
-   - Chạy `build.bat` để biên dịch thành file `WuwaTappoAutoClaim.exe`.
+    pip install -r requirements.txt
+
+Chạy bằng `run.bat` (dùng file `.exe` nếu có, không thì chạy Python), hoặc:
+
+    python app.py
+
+Một số tham số:
+
+    python app.py --status
+    python app.py --min-delay 5 --max-delay 30 --interval 15
+    python app.py --tray
+
+- `--status`: xem thông tin tài khoản rồi thoát
+- `--min-delay`, `--max-delay`, `--interval`: chỉnh độ trễ (giây)
+- `--tray`: khởi động ẩn dưới khay hệ thống
+
+Phím tắt trong terminal: `H` thu xuống khay, `S` mở menu cài đặt, `Q` thoát.
+
+Muốn đóng gói thành `.exe` thì chạy `build.bat`, file tạo ra là `WuwaTappoAutoClaim.exe`.
 
 ---
 
 ## English
 
-An intelligent auto-claim tool for **Wuwa Tappo** on Windows featuring a clean Fastfetch-style terminal dashboard and System Tray support.
+Auto-claim tool for **Wuwa Tappo** on Windows. Runs in the terminal and can minimize to the system tray.
 
-### ✨ Features
-- **Fastfetch Terminal UI:** Clean aesthetic dashboard with pastel accents, progress bars, accurate server timestamp countdown, and separate jitter display.
-- **Auto Token / CID Extraction:** Seamlessly extracts session tokens from WebView2 SQLite cookies or process memory.
-- **Multi-Device Game Detection:** Detects `WuwaTappo.exe` across running processes, Windows Uninstall registry, and all physical drive letters.
-- **Anti-Bot Mechanism:**
-  - Randomized jitter delay after chests spawn.
-  - Minimum cooldown interval between chest claims.
-  - Dynamic delta clicks mimicking human activity.
-- **Interactive Settings [S]:** Press `[S]` at runtime to open a numbered settings menu and adjust values without restarting.
-- **System Tray Integration:** Press `[H]` or minimize window to hide the console into the system tray.
+### Features
+- Grabs Token / CID from WebView2 cookies or the game's memory.
+- Finds the game through running processes, the registry and all drives.
+- Random delay after a chest spawns and a minimum interval between claims (`interval`) to avoid detection.
+- Change settings while it's running, no restart needed.
 
-### 🚀 Getting Started
-1. **Install dependencies:**
-   ```cmd
-   pip install -r requirements.txt
-   ```
-2. **Run:**
-   - Double-click `run.bat`.
-   - Or run with Python:
-     ```cmd
-     python app.py
-     ```
-3. **CLI Arguments:**
-   ```cmd
-   python app.py --status                          # Display account status & exit
-   python app.py --min-delay 5 --max-delay 30 --interval 15   # Custom delays
-   python app.py --tray                            # Start directly in system tray
-   ```
-4. **Terminal Hotkeys:**
-   - `[H]`: Hide to System Tray.
-   - `[S]`: Open Quick Settings menu.
-   - `[Q]`: Quit gracefully.
+### Usage
+Install dependencies (if running from source):
 
-5. **Build Standalone Binary:**
-   - Run `build.bat` to compile `WuwaTappoAutoClaim.exe`.
+    pip install -r requirements.txt
+
+Run with `run.bat` (uses the `.exe` if it exists, otherwise Python), or:
+
+    python app.py
+
+Some arguments:
+
+    python app.py --status
+    python app.py --min-delay 5 --max-delay 30 --interval 15
+    python app.py --tray
+
+- `--status`: show account info and exit
+- `--min-delay`, `--max-delay`, `--interval`: adjust delays (seconds)
+- `--tray`: start hidden in the system tray
+
+Hotkeys in the terminal: `H` to hide to tray, `S` for the settings menu, `Q` to quit.
+
+To build a standalone `.exe`, run `build.bat`. The output is `WuwaTappoAutoClaim.exe`.
 
 ---
+
 **License:** MIT
