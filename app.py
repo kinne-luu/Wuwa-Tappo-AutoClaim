@@ -1313,7 +1313,7 @@ def setup_pet_sync():
     """Apply WebView2 debugging registry policy ONLY for WuwaTappo.exe."""
     if os.name != "nt":
         return
-    arg = f"--remote-debugging-port={CDP_PORT}"
+    arg = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*"
     try:
         key_lm = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY)
         winreg.SetValueEx(key_lm, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
@@ -1423,7 +1423,7 @@ def restart_pet_if_needed():
     if app_exe and os.path.exists(app_exe):
         try:
             env = os.environ.copy()
-            env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={CDP_PORT}"
+            env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*"
             cwd = os.path.dirname(app_exe)
             subprocess.Popen([app_exe], env=env, cwd=cwd)
             for _ in range(8):
@@ -1484,21 +1484,13 @@ def sync_pet_ui(gross: int = 0, consumed: int = 0, left_ts: int = 0, right_ts: i
             if ws_url and ("tauri" in url or "wuwatappo" in title or "kuro" in url or "localhost" in url):
                 async def _send(endpoint):
                     async with websockets.connect(endpoint, close_timeout=2) as ws:
-                        if gross > 0 or consumed > 0:
-                            eval_cmd = {
-                                "id": 1,
-                                "method": "Runtime.evaluate",
-                                "params": {"expression": patch_js, "returnByValue": True},
-                            }
-                            await ws.send(json.dumps(eval_cmd))
-                            res_raw = await asyncio.wait_for(ws.recv(), timeout=1.5)
-                            res = json.loads(res_raw)
-                            val = res.get("result", {}).get("result", {}).get("value")
-                            if val is True:
-                                return True
-
-                        reload_cmd = {"id": 2, "method": "Page.reload", "params": {"ignoreCache": True}}
+                        # Luôn reload nhẹ lại WebView2 (0.1s không giật) để Pinia tự fetch lại /user/me sạch 100%
+                        reload_cmd = {"id": 1, "method": "Page.reload", "params": {"ignoreCache": False}}
                         await ws.send(json.dumps(reload_cmd))
+                        try:
+                            await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except Exception:
+                            pass
                         return True
 
                 synced = asyncio.run(_send(ws_url)) or synced
@@ -1956,14 +1948,14 @@ def main():
                 except Exception as e:
                     logger.debug(f"Pre-claim user info sync failed: {e}")
 
-                click_gain = CLICK_GAIN_PER_CHEST + random.randint(15, 95)
-                target_click = total_clicks + click_gain
-                min_needed = (total_consume + CHEST_COST) + MIN_BALANCE_MAINTAIN
+                # Đọc chính xác total_clicks hiện tại từ Server Kuro, không cộng thêm click ảo
+                target_click = total_clicks
+                min_needed = total_consume + CHEST_COST
                 if target_click < min_needed:
                     target_click = min_needed
 
                 place_name = "Chest #1" if chest_to_open == "left" else "Chest #2"
-                update_view(action=f"Claiming {place_name} - +{click_gain} clicks")
+                update_view(action=f"Claiming {place_name}...")
                 sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
                 sys.stdout.flush()
                 logger.info(f"Claiming {place_name} - Clicks: {target_click:,}...")
