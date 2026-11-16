@@ -1995,11 +1995,13 @@ def main():
                         chest_delays[other_chest] += int(min_chest_interval_sec - diff)
                     time.sleep(min_chest_interval_sec)
 
-                    last_claim_msg = f"{place_name} (+{consume:,} clicks) -> Balance: {total_clicks - total_consume:,} clicks"
+                    item_type = "Character" if asset.lower().startswith("role") else ("Accessory" if asset.lower().startswith("accessory") else ("Emote" if asset.lower().startswith("emote") else "Item"))
+                    rarity_str = rarity.capitalize() if rarity else "Common"
+                    last_claim_msg = f"{place_name}: {asset} ({item_type} - {rarity_str}) -> Balance: {total_clicks - total_consume:,} clicks"
 
                     logger.info(
-                        f"SUCCESS #{chest_count}: Claimed {place_name}! "
-                        f"New balance: {total_clicks - total_consume:,}"
+                        f"SUCCESS #{chest_count}: Claimed {place_name}! Reward: {asset} ({item_type} - {rarity_str}) | "
+                        f"New balance: {total_clicks - total_consume:,} | Raw Data: {data}"
                     )
 
                     send_discord_webhook(
