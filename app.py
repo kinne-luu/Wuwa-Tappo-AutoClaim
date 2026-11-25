@@ -1968,7 +1968,7 @@ def build_dashboard_lines(
         f"\033[38;5;255m● \033[38;5;218m● \033[38;5;212m●{c.RESET}"
     )
     lines.append(f"  {dots}")
-    lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« {PROJECT_NAME} is running smoothly! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
+    lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« Zani is working hard diligently! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
     lines.append(f"  {c.PASTEL_GRAY}[H] Hide to Tray    [S] Settings    [L] View Logs    [Q] Quit{c.RESET}")
     lines.append("")
 
