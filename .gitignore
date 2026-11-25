@@ -1,5 +1,6 @@
 # Sensitive & Configuration
 config.json
+stats.json
 *.log
 auto_claim.log*
 DEBUG_ANALYSIS.md

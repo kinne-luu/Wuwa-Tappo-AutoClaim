@@ -101,7 +101,7 @@ CA_BUNDLE_PATH = init_ssl_ca_bundle()
 
 PROJECT_NAME = "WuwaTappo AutoClaim"
 PROJECT_AUTHOR = "kinne-luu"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 if getattr(sys, "frozen", False):
@@ -112,6 +112,7 @@ else:
     BUNDLE_DIR = WORKSPACE_DIR
 
 CONFIG_FILE = os.path.join(WORKSPACE_DIR, "config.json")
+STATS_FILE = os.path.join(WORKSPACE_DIR, "stats.json")
 LOG_FILE = os.path.join(WORKSPACE_DIR, "auto_claim.log")
 
 CHEST_COST = 1000
@@ -140,6 +141,132 @@ min_chest_interval_sec = 30
 chest_delays = {"left": 0, "right": 0}
 webhook_url = ""
 custom_game_path = ""
+
+# Smart Idle Click Farmer state & config
+idle_farm_enabled = False
+idle_threshold_sec = 30
+farm_session_limit = 15000
+farm_max_balance = 0
+idle_farm_status = "OFF (Press [F] to Enable)"
+is_claiming_chest = False
+live_balance_ref = {"total_clicks": 0, "total_consume": 0}
+
+# Session & Lifetime Statistics
+_stats_lock = threading.Lock()
+session_start_mono = time.monotonic()
+
+
+def _new_stats_bucket() -> dict:
+    return {
+        "chests_claimed": 0,
+        "new_count": 0,
+        "dup_count": 0,
+        "farmed_clicks": 0,
+        "rarities": {"epic": 0, "rare": 0, "uncommon": 0, "common": 0},
+        "types": {"Character": 0, "Accessory": 0, "Emote": 0},
+        "recent_claims": [],
+    }
+
+
+session_stats = _new_stats_bucket()
+lifetime_stats = _new_stats_bucket()
+collection_state = {
+    "owned_total": 0,
+    "atlas_total": 899,
+    "owned_by_type": {"Character": 0, "Accessory": 0, "Emote": 0},
+    "atlas_by_type": {"Character": 260, "Accessory": 135, "Emote": 504},
+}
+
+
+def load_lifetime_stats():
+    global lifetime_stats
+    if not os.path.exists(STATS_FILE):
+        return
+    try:
+        with open(STATS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        base = _new_stats_bucket()
+        for k in ("chests_claimed", "new_count", "dup_count", "farmed_clicks"):
+            base[k] = int(raw.get(k, 0) or 0)
+        for rk in base["rarities"]:
+            base["rarities"][rk] = int((raw.get("rarities") or {}).get(rk, 0) or 0)
+        for tk in base["types"]:
+            base["types"][tk] = int((raw.get("types") or {}).get(tk, 0) or 0)
+        if isinstance(raw.get("recent_claims"), list):
+            base["recent_claims"] = raw["recent_claims"][:12]
+        with _stats_lock:
+            lifetime_stats = base
+    except Exception:
+        pass
+
+
+def save_lifetime_stats():
+    try:
+        with _stats_lock:
+            payload = json.loads(json.dumps(lifetime_stats))
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def record_claim_stat(place_name: str, asset_name: str, item_type: str, rarity: str, is_new: bool, qty: int):
+    r_key = (rarity or "common").strip().lower()
+    if r_key not in ("epic", "rare", "uncommon", "common"):
+        r_key = "common"
+    t_key = item_type if item_type in ("Character", "Accessory", "Emote") else "Character"
+    entry = {
+        "time": datetime.datetime.now().strftime("%m-%d %H:%M"),
+        "chest": place_name,
+        "name": asset_name,
+        "type": item_type,
+        "rarity": rarity.capitalize() if rarity else "Common",
+        "is_new": is_new,
+        "qty": qty or 1,
+    }
+    with _stats_lock:
+        for bucket in (session_stats, lifetime_stats):
+            bucket["chests_claimed"] += 1
+            if is_new is True:
+                bucket["new_count"] += 1
+            elif is_new is False:
+                bucket["dup_count"] += 1
+            bucket["rarities"][r_key] = bucket["rarities"].get(r_key, 0) + 1
+            if item_type in bucket["types"]:
+                bucket["types"][t_key] = bucket["types"].get(t_key, 0) + 1
+            bucket["recent_claims"].insert(0, entry)
+            bucket["recent_claims"] = bucket["recent_claims"][:12]
+    save_lifetime_stats()
+
+
+def record_farmed_clicks(delta: int, flush_disk: bool = False):
+    if delta <= 0:
+        return
+    with _stats_lock:
+        session_stats["farmed_clicks"] += delta
+        lifetime_stats["farmed_clicks"] += delta
+    if flush_disk:
+        save_lifetime_stats()
+
+
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_ulong)]
+
+
+def get_system_idle_seconds() -> float:
+    """Return real OS hardware keyboard/mouse idle duration in seconds (never reset by CDP events)."""
+    if os.name != "nt":
+        return 0.0
+    try:
+        lii = LASTINPUTINFO()
+        lii.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if user32.GetLastInputInfo(ctypes.byref(lii)):
+            tick = kernel32.GetTickCount() & 0xFFFFFFFF
+            elapsed_ms = (tick - (lii.dwTime & 0xFFFFFFFF)) & 0xFFFFFFFF
+            return elapsed_ms / 1000.0
+    except Exception:
+        pass
+    return 0.0
 
 
 
@@ -712,6 +839,25 @@ def open_log_file(icon=None, item=None):
         pass
 
 
+def toggle_idle_farm(icon=None, item=None):
+    global idle_farm_enabled, idle_farm_status
+    idle_farm_enabled = not idle_farm_enabled
+    save_config_key("idle_farm_enabled", idle_farm_enabled)
+    idle_farm_status = "ON · Waiting for idle..." if idle_farm_enabled else "OFF (Press [F] to Enable)"
+    logger.info(f"Smart Idle Click Farm {'ENABLED' if idle_farm_enabled else 'DISABLED'} by user.")
+    if tray_icon:
+        try:
+            tray_icon.update_menu()
+            tray_icon.notify(
+                f"Smart Idle Farm {'enabled' if idle_farm_enabled else 'disabled'}.",
+                PROJECT_NAME,
+            )
+        except Exception:
+            pass
+    if global_update_view_fn and not is_setting_active:
+        global_update_view_fn(in_place=True)
+
+
 def init_tray():
 
     global tray_icon
@@ -720,6 +866,11 @@ def init_tray():
             lambda item: "Hide Window" if is_window_visible else "Show Window",
             toggle_window,
             default=True,
+        ),
+        pystray.MenuItem(
+            "Idle Auto-Farm",
+            toggle_idle_farm,
+            checked=lambda item: idle_farm_enabled,
         ),
         pystray.MenuItem("View Logs", open_log_file),
         pystray.MenuItem(
@@ -761,6 +912,7 @@ def window_monitor_loop():
 
 def prompt_settings():
     global is_setting_active, min_delay_sec, max_delay_sec, min_chest_interval_sec, chest_delays, webhook_url, custom_game_path
+    global idle_farm_enabled, idle_threshold_sec, farm_session_limit, farm_max_balance, idle_farm_status
     if is_setting_active:
         return
     is_setting_active = True
@@ -768,6 +920,7 @@ def prompt_settings():
     try:
         sys.stdout.write("\033[?25h\n")
         while is_setting_active:
+            clear_terminal()
             print(f"\n  {c.BOLD}{c.PASTEL_YELLOW}─── [S] QUICK SETTINGS MENU ───{c.RESET}")
             print(f"  {c.PASTEL_CYAN}[1]{c.RESET} Min Jitter Delay       : {c.WHITE}{min_delay_sec}s{c.RESET}")
             print(f"  {c.PASTEL_CYAN}[2]{c.RESET} Max Jitter Delay       : {c.WHITE}{max_delay_sec}s{c.RESET}")
@@ -776,9 +929,14 @@ def prompt_settings():
             print(f"  {c.PASTEL_CYAN}[4]{c.RESET} Discord Webhook URL    : {c.WHITE}{webhook_disp}{c.RESET}")
             game_disp = custom_game_path if custom_game_path else "(Auto-Detect)"
             print(f"  {c.PASTEL_CYAN}[5]{c.RESET} Custom Game Path       : {c.WHITE}{game_disp}{c.RESET}")
+            farm_state_str = f"{c.PASTEL_GREEN}ON{c.RESET}" if idle_farm_enabled else f"{c.PASTEL_GRAY}OFF{c.RESET}"
+            print(f"  {c.PASTEL_CYAN}[6]{c.RESET} Smart Idle Click Farm  : {farm_state_str} {c.PASTEL_GRAY}(Wait idle >= {idle_threshold_sec}s){c.RESET}")
+            sess_lim_disp = f"{farm_session_limit:,} clicks/session" if farm_session_limit > 0 else "Unlimited"
+            bal_cap_disp = f"{farm_max_balance:,} clicks" if farm_max_balance > 0 else "No Cap"
+            print(f"  {c.PASTEL_CYAN}[7]{c.RESET} Idle Farm Safety Caps  : {c.WHITE}{sess_lim_disp}{c.RESET} {c.PASTEL_GRAY}│ Max Balance: {bal_cap_disp}{c.RESET}")
             print(f"  {c.PASTEL_CYAN}[0]{c.RESET} Save & Return to Dashboard\n")
 
-            choice = input(f"  {c.BOLD}Select option to edit [0-5]: {c.RESET}").strip()
+            choice = input(f"  {c.BOLD}Select option to edit [0-7]: {c.RESET}").strip()
             if choice == "1":
                 val = input(f"  Enter Min Jitter Delay in seconds [{min_delay_sec}]: ").strip()
                 if val.isdigit() and int(val) >= 0:
@@ -796,6 +954,7 @@ def prompt_settings():
                     print(f"  {c.PASTEL_GREEN}[+] Max Delay updated to {max_delay_sec}s{c.RESET}")
                 elif val.isdigit():
                     print(f"  {c.RED}[!] Max Delay must be >= Min Delay ({min_delay_sec}s){c.RESET}")
+                    time.sleep(1.0)
             elif choice == "3":
                 val = input(f"  Enter Min Chest Interval in seconds [{min_chest_interval_sec}]: ").strip()
                 if val.isdigit() and int(val) >= 0:
@@ -812,14 +971,41 @@ def prompt_settings():
                 custom_game_path = val
                 save_config_key("game_path", custom_game_path)
                 print(f"  {c.PASTEL_GREEN}[+] Custom Game Path updated!{c.RESET}")
+            elif choice == "6":
+                toggle = input(f"  Enable Smart Idle Farm? (y/n) [{'y' if idle_farm_enabled else 'n'}]: ").strip().lower()
+                if toggle in ("y", "yes", "1", "on"):
+                    idle_farm_enabled = True
+                elif toggle in ("n", "no", "0", "off"):
+                    idle_farm_enabled = False
+                save_config_key("idle_farm_enabled", idle_farm_enabled)
+                idle_farm_status = "ON · Waiting for idle..." if idle_farm_enabled else "OFF (Press [F] to Enable)"
+                val = input(f"  Idle wait before farming (seconds, min 10) [{idle_threshold_sec}]: ").strip()
+                if val.isdigit():
+                    idle_threshold_sec = max(10, int(val))
+                    save_config_key("idle_threshold_sec", idle_threshold_sec)
+                if tray_icon:
+                    try:
+                        tray_icon.update_menu()
+                    except Exception:
+                        pass
+            elif choice == "7":
+                v1 = input(f"  Max clicks to farm per session (0 = unlimited) [{farm_session_limit}]: ").strip()
+                if v1.isdigit():
+                    farm_session_limit = max(0, int(v1))
+                    save_config_key("farm_session_limit", farm_session_limit)
+                v2 = input(f"  Stop farming if balance >= X (0 = no cap) [{farm_max_balance}]: ").strip()
+                if v2.isdigit():
+                    farm_max_balance = max(0, int(v2))
+                    save_config_key("farm_max_balance", farm_max_balance)
             elif choice in ("0", "", "q", "Q"):
                 chest_delays["left"] = random.randint(min_delay_sec, max_delay_sec)
                 chest_delays["right"] = random.randint(min_delay_sec, max_delay_sec)
                 print(f"\n  {c.PASTEL_GREEN}[+] Settings saved. Returning to dashboard...{c.RESET}")
-                time.sleep(0.7)
+                time.sleep(0.5)
                 break
             else:
-                print(f"  {c.PASTEL_YELLOW}[!] Invalid choice. Please enter 0 to 5.{c.RESET}")
+                print(f"  {c.PASTEL_YELLOW}[!] Invalid choice. Please enter 0 to 7.{c.RESET}")
+                time.sleep(0.8)
     except Exception as e:
         logger.debug(f"Prompt settings error: {e}")
     finally:
@@ -878,6 +1064,101 @@ def show_logs_view():
             global_update_view_fn(in_place=False)
 
 
+def _mini_bar(cur: int, total: int, width: int = 14) -> str:
+    c = Color
+    pct = min(1.0, max(0.0, cur / max(1, total)))
+    filled = int(pct * width)
+    return f"{c.PASTEL_CYAN}{'━' * filled}{c.PASTEL_GRAY}{'─' * (width - filled)}{c.RESET} {c.WHITE}{cur}/{total}{c.RESET} {c.PASTEL_YELLOW}({pct * 100:.1f}%){c.RESET}"
+
+
+def show_stats_view():
+    """Display detailed Collection Progress, Session Stats, All-Time Stats, and Recent Claim History."""
+    global is_setting_active, lifetime_stats
+    if is_setting_active:
+        return
+    is_setting_active = True
+    c = Color
+    try:
+        while True:
+            clear_terminal()
+            with _stats_lock:
+                ss = json.loads(json.dumps(session_stats))
+                ls = json.loads(json.dumps(lifetime_stats))
+
+            up_sec = int(time.monotonic() - session_start_mono)
+            up_h, rem = divmod(up_sec, 3600)
+            up_m, up_s = divmod(rem, 60)
+            up_str = f"{up_h}h {up_m:02d}m {up_s:02d}s" if up_h else f"{up_m:02d}m {up_s:02d}s"
+
+            print(f"\n  {c.BOLD}{c.PASTEL_CYAN}─── [T] COLLECTION & STATISTICS ───{c.RESET}\n")
+
+            # 1. Collection Progress
+            ot = collection_state["owned_total"]
+            at = collection_state["atlas_total"]
+            ob = collection_state["owned_by_type"]
+            ab = collection_state["atlas_by_type"]
+            print(f"  {c.BOLD}{c.PASTEL_BLUE}▸ Collection Progress (Atlas){c.RESET}")
+            print(f"    Overall     : {_mini_bar(ot, at, 18)}")
+            print(f"    Characters  : {_mini_bar(ob.get('Character', 0), ab.get('Character', 260), 18)}")
+            print(f"    Accessories : {_mini_bar(ob.get('Accessory', 0), ab.get('Accessory', 135), 18)}")
+            print(f"    Emotes      : {_mini_bar(ob.get('Emote', 0), ab.get('Emote', 504), 18)}\n")
+
+            # 2. Session vs All-Time Stats
+            def _fmt_bucket(b: dict) -> str:
+                tot = b["chests_claimed"]
+                nw = b["new_count"]
+                dp = b["dup_count"]
+                nw_pct = f" ({nw * 100 / tot:.0f}%)" if tot > 0 else ""
+                r = b["rarities"]
+                return (
+                    f"Chests: {c.WHITE}{tot}{c.RESET} │ "
+                    f"{c.PASTEL_GREEN}NEW: {nw}{nw_pct}{c.RESET} · {c.PASTEL_GRAY}DUP: {dp}{c.RESET} │ "
+                    f"Farmed: {c.PASTEL_CYAN}+{b['farmed_clicks']:,}{c.RESET}\n"
+                    f"                  "
+                    f"\033[1;95mEpic {r['epic']}\033[0m · "
+                    f"\033[1;94mRare {r['rare']}\033[0m · "
+                    f"\033[1;92mUncommon {r['uncommon']}\033[0m · "
+                    f"\033[1;93mCommon {r['common']}\033[0m"
+                )
+
+            print(f"  {c.BOLD}{c.PASTEL_PINK}▸ Session ({up_str}){c.RESET}")
+            print(f"    {_fmt_bucket(ss)}\n")
+            print(f"  {c.BOLD}{c.PASTEL_YELLOW}▸ All-Time Recorded{c.RESET}")
+            print(f"    {_fmt_bucket(ls)}\n")
+
+            # 3. Recent Claim History
+            print(f"  {c.BOLD}{c.PASTEL_GREEN}▸ Recent Claims{c.RESET}")
+            recent = ls.get("recent_claims") or []
+            if not recent:
+                print(f"    {c.PASTEL_GRAY}(No chests recorded yet in stats.json){c.RESET}")
+            else:
+                for item in recent[:6]:
+                    tag = f"{c.PASTEL_GREEN}[NEW]{c.RESET}" if item.get("is_new") else f"{c.PASTEL_GRAY}[DUP x{item.get('qty', 1)}]{c.RESET}"
+                    rar = (item.get("rarity") or "Common").lower()
+                    r_col = c.RARITY.get(rar, c.WHITE)
+                    print(f"    {c.PASTEL_GRAY}{item.get('time', '')}{c.RESET} {item.get('chest', '')} {tag} {item.get('type', '')}: {r_col}{item.get('name', '')} ({item.get('rarity', '')}){c.RESET}")
+
+            print(f"\n  {c.PASTEL_CYAN}[R]{c.RESET} Reset All-Time Stats      {c.PASTEL_CYAN}[Any Key]{c.RESET} Return to Dashboard\n")
+
+            import msvcrt
+            pressed = None
+            while True:
+                if msvcrt.kbhit():
+                    pressed = msvcrt.getch()
+                    break
+                time.sleep(0.05)
+            if pressed in (b'r', b'R'):
+                with _stats_lock:
+                    lifetime_stats = _new_stats_bucket()
+                save_lifetime_stats()
+                continue
+            break
+    finally:
+        is_setting_active = False
+        if global_update_view_fn:
+            global_update_view_fn(in_place=False)
+
+
 def console_input_loop():
     global running_flag
     if os.name != "nt":
@@ -887,8 +1168,17 @@ def console_input_loop():
         try:
             if msvcrt.kbhit():
                 ch = msvcrt.getch()
+                if ch in (b'\x00', b'\xe0'):
+                    # Drain special arrow/function key second byte
+                    if msvcrt.kbhit():
+                        msvcrt.getch()
+                    continue
                 if ch in (b'h', b'H', b'm', b'M'):
                     hide_window(notify_user=True)
+                elif ch in (b'f', b'F'):
+                    toggle_idle_farm()
+                elif ch in (b't', b'T'):
+                    show_stats_view()
                 elif ch in (b's', b'S'):
                     prompt_settings()
                 elif ch in (b'l', b'L'):
@@ -925,6 +1215,7 @@ Usage Examples:
     parser.add_argument("--webhook", type=str, help="Set Discord Webhook URL")
     parser.add_argument("--tray", "--headless", "--hide", dest="start_tray", action="store_true", help="Start directly in System Tray (minimized)")
     parser.add_argument("--no-sync", action="store_true", help="Disable Pet CDP sync")
+    parser.add_argument("--idle-farm", action="store_true", help="Enable Smart Idle Click Farm on startup")
     return parser.parse_args()
 
 
@@ -995,7 +1286,7 @@ def load_config(cli_args=None):
         token = raw_token
         token_src = "User Input"
 
-    global webhook_url, custom_game_path
+    global webhook_url, custom_game_path, idle_farm_enabled, idle_threshold_sec, farm_session_limit, farm_max_balance, idle_farm_status
     webhook_url = cfg.get("discord_webhook", "").strip()
     if cli_args and getattr(cli_args, "webhook", None) is not None:
         webhook_url = cli_args.webhook.strip()
@@ -1010,6 +1301,14 @@ def load_config(cli_args=None):
     min_delay_sec = int(cfg.get("min_delay_sec", 5))
     max_delay_sec = int(cfg.get("max_delay_sec", 60))
     min_chest_interval_sec = int(cfg.get("min_chest_interval_sec", 10))
+
+    idle_farm_enabled = bool(cfg.get("idle_farm_enabled", False))
+    if cli_args and getattr(cli_args, "idle_farm", False):
+        idle_farm_enabled = True
+    idle_threshold_sec = max(10, int(cfg.get("idle_threshold_sec", 30)))
+    farm_session_limit = max(0, int(cfg.get("farm_session_limit", 15000)))
+    farm_max_balance = max(0, int(cfg.get("farm_max_balance", 0)))
+    idle_farm_status = "ON · Waiting for idle..." if idle_farm_enabled else "OFF (Press [F] to Enable)"
 
     if cli_args:
         if getattr(cli_args, "min_delay", None) is not None:
@@ -1033,6 +1332,10 @@ def load_config(cli_args=None):
     cfg["min_delay_sec"] = min_delay_sec
     cfg["max_delay_sec"] = max_delay_sec
     cfg["min_chest_interval_sec"] = min_chest_interval_sec
+    cfg["idle_farm_enabled"] = idle_farm_enabled
+    cfg["idle_threshold_sec"] = idle_threshold_sec
+    cfg["farm_session_limit"] = farm_session_limit
+    cfg["farm_max_balance"] = farm_max_balance
 
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -1060,11 +1363,11 @@ def get_asset_url(asset_name: str) -> str:
 
 def classify_asset_type(asset_type: str = "", asset_name: str = "") -> str:
     t = str(asset_type or "").strip().lower()
-    if t in ("character_skin", "character", "role"):
+    if t in ("character_skin", "character_skin_atlas", "character", "role"):
         return "Character"
-    if t == "accessory":
+    if t in ("accessory", "accessory_atlas"):
         return "Accessory"
-    if t == "emote":
+    if t in ("emote", "emote_atlas"):
         return "Emote"
     n = str(asset_name or "").strip().lower()
     if n.startswith("role"):
@@ -1262,6 +1565,16 @@ class WuwaTappoClient:
                     return v
         return []
 
+    def get_atlas_list(self) -> list:
+        try:
+            r = self._safe_request("GET", f"{SERVICE_BASE}/api/common/atlas", headers=self._headers())
+            res = r.json()
+            if res.get("code") == 0 and isinstance(res.get("data"), list):
+                return res["data"]
+        except Exception as e:
+            logger.debug(f"get_atlas_list failed: {e}")
+        return []
+
     def open_chest(self, place, click_num):
 
         payload = {"place": place, "click_num": click_num}
@@ -1314,6 +1627,39 @@ def evaluate_bag_reward(bag_before: dict, asset_id=None, asset_name: str = "", b
             if curr.get("quantity", 0) > prev.get("quantity", 0):
                 return False, curr.get("quantity", 1)
     return None, None
+
+
+def refresh_collection_state(client: WuwaTappoClient, bag_items: list = None, fetch_atlas: bool = False):
+    """Update collection_state from bags/list and optionally /api/common/atlas."""
+    if fetch_atlas and client:
+        atlas_items = client.get_atlas_list()
+        if atlas_items:
+            at_by_type = {"Character": 0, "Accessory": 0, "Emote": 0}
+            for it in atlas_items:
+                if not isinstance(it, dict):
+                    continue
+                cat = classify_asset_type(it.get("asset_type", ""), it.get("asset_name", ""))
+                if cat in at_by_type:
+                    at_by_type[cat] += 1
+            collection_state["atlas_total"] = len(atlas_items)
+            collection_state["atlas_by_type"] = at_by_type
+
+    if bag_items is None and client:
+        bag_items = client.get_bag_list()
+    if bag_items is not None:
+        ow_by_type = {"Character": 0, "Accessory": 0, "Emote": 0}
+        owned_count = 0
+        for it in bag_items:
+            if not isinstance(it, dict):
+                continue
+            if int(it.get("quantity") or it.get("num") or 1) <= 0:
+                continue
+            owned_count += 1
+            cat = classify_asset_type(it.get("asset_type", ""), it.get("asset_name", ""))
+            if cat in ow_by_type:
+                ow_by_type[cat] += 1
+        collection_state["owned_total"] = owned_count
+        collection_state["owned_by_type"] = ow_by_type
 
 
 def format_duration(seconds: int) -> str:
@@ -1788,7 +2134,182 @@ def claim_chest_via_cdp(place: str, timeout_sec: float = 10.0) -> dict:
         return {"status": "error", "detail": str(e)}
 
 
+def idle_farm_worker():
+    """Smart Anti-Ban Idle Click Farmer:
+    - Uses real OS GetLastInputInfo() (never reset by our CDP claps, stops within <100ms on mouse/key touch).
+    - Emits native Tauri 'global-clap-mouse' inside Pet WebView2 via CDP (zero OS SendInput / anti-cheat safe).
+    - 3-layer human rhythm: natural log-normal/triangular intervals (~2.5-4.2 CPS), short bursts (8-26 clicks)
+      with micro-pauses (3.5-11.5s), and periodic macro breaks (45-110s every 6-12 mins).
+    - Respects session click limit, max balance cap, and pauses automatically while claiming chests.
+    """
+    global idle_farm_status
+    clap_expr = "window.__TAURI_INTERNALS__?.invoke('plugin:event|emit', { event: 'global-clap-mouse', payload: null })"
+    read_store_expr = """
+    (() => {
+        const s = document.querySelector('#app')?.__vue_app__?.config?.globalProperties?.$pinia?._s?.get('GlobalState');
+        if (!s) return null;
+        return {
+            cum: Number(s.cumulativeClickCount ?? 0),
+            cons: Number(s.userInfo?.total_click_consume ?? 0),
+            bal: Number(s.totalClickCount ?? 0),
+        };
+    })()
+    """
+
+    active_streak_start = 0.0
+    next_macro_break_sec = random.randint(360, 720)
+
+    def _interruptible_wait(duration: float, status_prefix: str = "") -> bool:
+        """Wait while checking every 0.2s if user became active, disabled farm, or app exited."""
+        global idle_farm_status
+        end_m = time.monotonic() + duration
+        while running_flag and time.monotonic() < end_m:
+            if not idle_farm_enabled:
+                idle_farm_status = "OFF (Press [F] to Enable)"
+                return False
+            if get_system_idle_seconds() < idle_threshold_sec:
+                return False
+            if status_prefix:
+                rem = max(1, int(end_m - time.monotonic()))
+                with _stats_lock:
+                    fc = session_stats["farmed_clicks"]
+                idle_farm_status = f"ON · {status_prefix} ({rem}s) │ +{fc:,}"
+            time.sleep(min(0.2, max(0.05, end_m - time.monotonic())))
+        return running_flag and idle_farm_enabled
+
+    while running_flag:
+        try:
+            if not idle_farm_enabled:
+                idle_farm_status = "OFF (Press [F] to Enable)"
+                active_streak_start = 0.0
+                time.sleep(0.5)
+                continue
+
+            with _stats_lock:
+                sess_farmed = session_stats["farmed_clicks"]
+
+            if farm_session_limit > 0 and sess_farmed >= farm_session_limit:
+                idle_farm_status = f"ON · Session cap reached (+{sess_farmed:,}/{farm_session_limit:,})"
+                active_streak_start = 0.0
+                time.sleep(2.0)
+                continue
+
+            cur_bal = live_balance_ref["total_clicks"] - live_balance_ref["total_consume"]
+            if farm_max_balance > 0 and cur_bal >= farm_max_balance:
+                idle_farm_status = f"ON · Balance cap reached ({cur_bal:,} >= {farm_max_balance:,})"
+                active_streak_start = 0.0
+                time.sleep(2.0)
+                continue
+
+            if is_claiming_chest:
+                idle_farm_status = f"ON · Paused (Claiming chest) │ +{sess_farmed:,}"
+                time.sleep(0.5)
+                continue
+
+            idle_sec = get_system_idle_seconds()
+            if idle_sec < idle_threshold_sec:
+                active_streak_start = 0.0
+                idle_farm_status = f"ON · Standby (User active, idle {int(idle_sec)}s/{idle_threshold_sec}s) │ +{sess_farmed:,}"
+                time.sleep(0.6)
+                continue
+
+            ws_url = find_cdp_main_target() if (is_app_running() and is_cdp_ready()) else None
+            if not ws_url:
+                idle_farm_status = f"ON · Waiting for Pet CDP... │ +{sess_farmed:,}"
+                active_streak_start = 0.0
+                time.sleep(2.0)
+                continue
+
+            # Macro break check (every 6-12 mins of active idle farming -> rest 45-110s)
+            now_m = time.monotonic()
+            if active_streak_start <= 0.0:
+                active_streak_start = now_m
+                next_macro_break_sec = random.randint(360, 720)
+            elif (now_m - active_streak_start) >= next_macro_break_sec:
+                break_dur = random.randint(45, 110)
+                logger.debug(f"[IdleFarm] Taking natural macro break for {break_dur}s.")
+                _interruptible_wait(break_dur, "Natural break")
+                active_streak_start = time.monotonic()
+                next_macro_break_sec = random.randint(360, 720)
+                continue
+
+            # Execute one human-like burst (8-26 clicks) over a single CDP WebSocket
+            burst_target = random.randint(8, 26)
+            if farm_session_limit > 0:
+                burst_target = min(burst_target, max(1, farm_session_limit - sess_farmed))
+
+            import websockets
+
+            async def _run_burst(target_count: int):
+                global idle_farm_status
+                done_in_burst = 0
+                msg_id = 1
+                async with websockets.connect(ws_url, close_timeout=1.5, max_size=1024 * 1024) as ws:
+                    for _ in range(target_count):
+                        if not (running_flag and idle_farm_enabled) or is_claiming_chest:
+                            break
+                        if get_system_idle_seconds() < idle_threshold_sec:
+                            break
+                        if farm_max_balance > 0 and (live_balance_ref["total_clicks"] - live_balance_ref["total_consume"] + done_in_burst) >= farm_max_balance:
+                            break
+
+                        await ws.send(json.dumps({
+                            "id": msg_id,
+                            "method": "Runtime.evaluate",
+                            "params": {"expression": clap_expr, "returnByValue": True},
+                        }))
+                        try:
+                            await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except Exception:
+                            break
+                        msg_id += 1
+                        done_in_burst += 1
+                        record_farmed_clicks(1, flush_disk=False)
+
+                        with _stats_lock:
+                            fc_now = session_stats["farmed_clicks"]
+                        idle_farm_status = f"ON · Farming burst ({done_in_burst}/{target_count}) │ +{fc_now:,} clicks"
+
+                        # Human cadence: 12% quick double-tap (0.13-0.17s), 88% natural rhythm (0.18-0.56s, mode 0.27s)
+                        if random.random() < 0.12:
+                            delay = random.uniform(0.13, 0.17)
+                        else:
+                            delay = random.triangular(0.18, 0.56, 0.27)
+                        await asyncio.sleep(delay)
+
+                    # Read updated live click totals from Pinia store at end of burst
+                    if done_in_burst > 0:
+                        await ws.send(json.dumps({
+                            "id": msg_id,
+                            "method": "Runtime.evaluate",
+                            "params": {"expression": read_store_expr, "returnByValue": True},
+                        }))
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                            val = json.loads(raw).get("result", {}).get("result", {}).get("value")
+                            if isinstance(val, dict) and val.get("cum", 0) > 0:
+                                live_balance_ref["total_clicks"] = max(live_balance_ref["total_clicks"], int(val["cum"]))
+                                if val.get("cons", 0) > 0:
+                                    live_balance_ref["total_consume"] = max(live_balance_ref["total_consume"], int(val["cons"]))
+                        except Exception:
+                            pass
+                return done_in_burst
+
+            burst_done = asyncio.run(_run_burst(burst_target))
+            if burst_done > 0:
+                save_lifetime_stats()
+
+            # Natural micro-pause between bursts (3.5s - 11.5s)
+            if idle_farm_enabled and get_system_idle_seconds() >= idle_threshold_sec:
+                pause_sec = random.uniform(3.5, 11.5)
+                _interruptible_wait(pause_sec, "Burst rest")
+        except Exception as e:
+            logger.debug(f"idle_farm_worker error: {e}")
+            time.sleep(2.0)
+
+
 def cleanup_app_exit():
+    save_lifetime_stats()
     cleanup_registry_policy()
     try:
         sys.stdout.write("\033[?25h")
@@ -1938,13 +2459,37 @@ def build_dashboard_lines(
     lines.append(row(c.PASTEL_CYAN, "Player", f"{c.BOLD}{c.WHITE}{nickname}{c.RESET}"))
     lines.append(row(c.PASTEL_CYAN, "Balance", f"{c.BOLD}{c.PASTEL_GREEN}{balance:,} clicks{c.RESET}"))
     lines.append(row(c.PASTEL_CYAN, "Total Stats", f"{c.WHITE}{total_clicks:,} clicks total{c.RESET} {c.PASTEL_GRAY}│ Spent {total_consume:,}{c.RESET}"))
-    if cid_str:
-        lines.append(row(c.PASTEL_CYAN, "CID", f"{c.WHITE}{cid_str}{c.RESET}"))
+    ot = collection_state["owned_total"]
+    at = max(1, collection_state["atlas_total"])
+    if ot > 0:
+        ob = collection_state["owned_by_type"]
+        ab = collection_state["atlas_by_type"]
+        col_pct = ot * 100 / at
+        col_str = (
+            f"{c.BOLD}{c.PASTEL_YELLOW}{ot}/{at}{c.RESET} {c.PASTEL_GRAY}({col_pct:.1f}%) │ "
+            f"Char {ob.get('Character', 0)}/{ab.get('Character', 260)} · "
+            f"Acc {ob.get('Accessory', 0)}/{ab.get('Accessory', 135)} · "
+            f"Emote {ob.get('Emote', 0)}/{ab.get('Emote', 504)}{c.RESET}"
+        )
+        lines.append(row(c.PASTEL_CYAN, "Collection", col_str))
     lines.append("")
 
-    # Block 2: Engine & Timing Config (Pastel Pink bar)
+    # Block 2: Engine, Idle Farm & Session (Pastel Pink bar)
     mode_disp = claim_mode or ("CDP Native-Click (Pet Synced)" if app_running else "Headless API Mode")
     lines.append(row(c.PASTEL_PINK, "Mode", f"{c.BOLD}{c.PASTEL_GREEN}{mode_disp}{c.RESET}"))
+    farm_col = c.PASTEL_GREEN if idle_farm_enabled else c.PASTEL_GRAY
+    lines.append(row(c.PASTEL_PINK, "Idle Farm", f"{farm_col}{idle_farm_status}{c.RESET}"))
+    with _stats_lock:
+        sc_tot = session_stats["chests_claimed"]
+        sc_new = session_stats["new_count"]
+        sc_dup = session_stats["dup_count"]
+        sc_frm = session_stats["farmed_clicks"]
+    sess_str = (
+        f"{c.WHITE}Chests: {sc_tot}{c.RESET} "
+        f"{c.PASTEL_GRAY}({c.PASTEL_GREEN}{sc_new} NEW{c.PASTEL_GRAY} · {sc_dup} DUP) │ "
+        f"Farmed: {c.PASTEL_CYAN}+{sc_frm:,} clicks{c.RESET}"
+    )
+    lines.append(row(c.PASTEL_PINK, "Session", sess_str))
     lines.append(row(c.PASTEL_PINK, "State", f"{c.BOLD}{c.PASTEL_CYAN}{current_action}{c.RESET}"))
     lines.append(row(c.PASTEL_PINK, "Jitter", f"{c.WHITE}{min_delay}s - {max_delay}s{c.RESET} {c.PASTEL_GRAY}│ Min Interval: {interval}s{c.RESET}"))
     lines.append("")
@@ -1969,7 +2514,7 @@ def build_dashboard_lines(
     )
     lines.append(f"  {dots}")
     lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« Zani is working hard diligently! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
-    lines.append(f"  {c.PASTEL_GRAY}[H] Hide to Tray    [S] Settings    [L] View Logs    [Q] Quit{c.RESET}")
+    lines.append(f"  {c.PASTEL_GRAY}[F] Idle Farm   [T] Stats   [S] Settings   [L] Logs   [H] Hide   [Q] Quit{c.RESET}")
     lines.append("")
 
     return lines
@@ -2035,12 +2580,12 @@ def redraw_screen(
         claim_mode=claim_mode,
     ))
 
-    content = "\n".join(lines)
     if in_place:
-        sys.stdout.write("\033[H" + content + "   \n")
+        cleared = "\n".join(l + "\033[K" for l in lines)
+        sys.stdout.write("\033[H" + cleared + "\033[J\n")
     else:
         clear_terminal()
-        sys.stdout.write(content + "\n")
+        sys.stdout.write("\n".join(lines) + "\n")
     sys.stdout.flush()
 
 
@@ -2080,7 +2625,8 @@ def merge_chest_ts(*candidates) -> int:
 
 
 def main():
-    global pet_sync_enabled
+    global pet_sync_enabled, is_claiming_chest
+    load_lifetime_stats()
     cli_args = parse_cli_args()
     if cli_args and getattr(cli_args, "no_sync", False):
         pet_sync_enabled = False
@@ -2092,6 +2638,7 @@ def main():
             user = client.get_user_info()
             server_time = client.get_server_time()
             bag_items = client.get_bag_list()
+            refresh_collection_state(client, bag_items=bag_items, fetch_atlas=True)
         except Exception as e:
             print(f"Error fetching account info: {e}")
             sys.exit(1)
@@ -2158,6 +2705,7 @@ def main():
     if os.name == "nt":
         threading.Thread(target=window_monitor_loop, daemon=True).start()
         threading.Thread(target=console_input_loop, daemon=True).start()
+        threading.Thread(target=idle_farm_worker, daemon=True).start()
 
     token_str = f"{token[:8]}...{token[-8:]}"
     cid_str = f"{cid[:6]}...{cid[-6:]}"
@@ -2200,8 +2748,14 @@ def main():
     nickname = user.get("nickname", "User")
     total_clicks = user.get("total_click_count", 0)
     total_consume = user.get("total_click_consume", 0)
+    live_balance_ref["total_clicks"] = total_clicks
+    live_balance_ref["total_consume"] = total_consume
     left_ts = merge_chest_ts(user.get("left_treasure_chest", 0))
     right_ts = merge_chest_ts(user.get("right_treasure_chest", 0))
+    try:
+        refresh_collection_state(client, fetch_atlas=True)
+    except Exception:
+        pass
 
     chest_count = 0
     last_claim_msg = ""
@@ -2251,12 +2805,14 @@ def main():
         if override_claim_msg is not None:
             last_claim_msg = override_claim_msg
 
+        disp_clicks = max(total_clicks, live_balance_ref["total_clicks"])
+        disp_consume = max(total_consume, live_balance_ref["total_consume"])
         _, _, mode_lbl = refresh_mode_status(force=force_mode)
         redraw_screen(
             nickname=nickname,
-            balance=total_clicks - total_consume,
-            total_clicks=total_clicks,
-            total_consume=total_consume,
+            balance=disp_clicks - disp_consume,
+            total_clicks=disp_clicks,
+            total_consume=disp_consume,
             left_ts=left_ts,
             right_ts=right_ts,
             now_ts=current_server_ts(),
@@ -2394,6 +2950,7 @@ def main():
                             continue
 
                 # Snapshot bag before opening to identify [NEW] vs [DUP xN]
+                is_claiming_chest = True
                 bag_before = {}
                 try:
                     bag_before = build_bag_snapshot(client.get_bag_list())
@@ -2404,75 +2961,78 @@ def main():
                 res = None
                 claim_mode_used = "CDP Native-Click" if cdp_active else "Headless API"
 
-                if cdp_active:
-                    update_view(action=f"Clicking {place_name} in Pet UI (CDP)...")
-                    logger.info(f"[CDP] Triggering native in-app click on {place_name}...")
-                    cdp_res = claim_chest_via_cdp(chest_to_open, timeout_sec=10.0)
-                    st_code = cdp_res.get("status")
+                try:
+                    if cdp_active:
+                        update_view(action=f"Clicking {place_name} in Pet UI (CDP)...")
+                        logger.info(f"[CDP] Triggering native in-app click on {place_name}...")
+                        cdp_res = claim_chest_via_cdp(chest_to_open, timeout_sec=10.0)
+                        st_code = cdp_res.get("status")
 
-                    if st_code == "not_ready":
-                        logger.debug(f"[CDP] {place_name} button not ready yet ({cdp_res.get('detail')}). Waiting...")
-                        update_view(in_place=True, action=f"Waiting for {place_name} button in Pet UI...")
-                        time.sleep(2)
-                        continue
-                    elif st_code == "ok":
-                        res = cdp_res.get("response", {"code": 0, "data": {}})
-                    elif st_code == "clicked_no_body":
-                        # Button was clicked; verify via bags/list & user/me diff after short wait
-                        time.sleep(2.0)
-                        bag_after_tmp = {}
-                        try:
-                            bag_after_tmp = build_bag_snapshot(client.get_bag_list())
-                            u2 = client.get_user_info()
-                            total_clicks = u2.get("total_click_count", total_clicks)
-                            total_consume = u2.get("total_click_consume", total_consume)
-                            left_ts = merge_chest_ts(left_ts, u2.get("left_treasure_chest"))
-                            right_ts = merge_chest_ts(right_ts, u2.get("right_treasure_chest"))
-                        except Exception:
-                            pass
-                        diff_item = None
-                        for k, curr in bag_after_tmp.items():
-                            prev = bag_before.get(k)
-                            if prev is None or curr.get("quantity", 0) > prev.get("quantity", 0):
-                                diff_item = curr
-                                break
-                        if diff_item:
-                            res = {
-                                "code": 0,
-                                "data": {
-                                    "asset_id": diff_item.get("asset_id"),
-                                    "asset_name": diff_item.get("asset_name", "Unknown"),
-                                    "asset_type": diff_item.get("asset_type", ""),
-                                    "rarity_type": diff_item.get("rarity_type", "common"),
-                                    "click_consume": CHEST_COST,
-                                    "left_next_time": left_ts,
-                                    "right_next_time": right_ts,
-                                },
-                            }
+                        if st_code == "not_ready":
+                            logger.debug(f"[CDP] {place_name} button not ready yet ({cdp_res.get('detail')}). Waiting...")
+                            update_view(in_place=True, action=f"Waiting for {place_name} button in Pet UI...")
+                            time.sleep(2)
+                            continue
+                        elif st_code == "ok":
+                            res = cdp_res.get("response", {"code": 0, "data": {}})
+                        elif st_code == "clicked_no_body":
+                            # Button was clicked; verify via bags/list & user/me diff after short wait
+                            time.sleep(2.0)
+                            bag_after_tmp = {}
+                            try:
+                                bag_after_tmp = build_bag_snapshot(client.get_bag_list())
+                                u2 = client.get_user_info()
+                                total_clicks = u2.get("total_click_count", total_clicks)
+                                total_consume = u2.get("total_click_consume", total_consume)
+                                left_ts = merge_chest_ts(left_ts, u2.get("left_treasure_chest"))
+                                right_ts = merge_chest_ts(right_ts, u2.get("right_treasure_chest"))
+                            except Exception:
+                                pass
+                            diff_item = None
+                            for k, curr in bag_after_tmp.items():
+                                prev = bag_before.get(k)
+                                if prev is None or curr.get("quantity", 0) > prev.get("quantity", 0):
+                                    diff_item = curr
+                                    break
+                            if diff_item:
+                                res = {
+                                    "code": 0,
+                                    "data": {
+                                        "asset_id": diff_item.get("asset_id"),
+                                        "asset_name": diff_item.get("asset_name", "Unknown"),
+                                        "asset_type": diff_item.get("asset_type", ""),
+                                        "rarity_type": diff_item.get("rarity_type", "common"),
+                                        "click_consume": CHEST_COST,
+                                        "left_next_time": left_ts,
+                                        "right_next_time": right_ts,
+                                    },
+                                }
+                            else:
+                                res = {"code": -1, "message": cdp_res.get("detail", "CDP click sent, no response captured")}
+                        elif st_code == "api_error":
+                            res = cdp_res.get("response") or {"code": -1, "message": cdp_res.get("detail", "CDP API error")}
                         else:
-                            res = {"code": -1, "message": cdp_res.get("detail", "CDP click sent, no response captured")}
-                    elif st_code == "api_error":
-                        res = cdp_res.get("response") or {"code": -1, "message": cdp_res.get("detail", "CDP API error")}
+                            res = {"code": -1, "message": f"CDP error: {cdp_res.get('detail', 'unknown')}"}
                     else:
-                        res = {"code": -1, "message": f"CDP error: {cdp_res.get('detail', 'unknown')}"}
-                else:
-                    # Clean Headless API Mode (Pet is closed or --no-sync): NEVER fabricate fake clicks!
-                    current_balance = total_clicks - total_consume
-                    if current_balance < CHEST_COST:
-                        update_view(in_place=True, action=f"Low balance ({current_balance:,} < {CHEST_COST:,} clicks) - Waiting")
-                        time.sleep(10)
-                        continue
+                        # Clean Headless API Mode (Pet is closed or --no-sync): NEVER fabricate fake clicks!
+                        current_balance = total_clicks - total_consume
+                        if current_balance < CHEST_COST:
+                            update_view(in_place=True, action=f"Low balance ({current_balance:,} < {CHEST_COST:,} clicks) - Waiting")
+                            time.sleep(10)
+                            continue
 
-                    target_click = total_clicks
-                    update_view(action=f"Claiming {place_name} (API)...")
-                    sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
-                    sys.stdout.flush()
-                    logger.info(f"[API] Claiming {place_name} - Clicks: {target_click:,}...")
+                        target_click = total_clicks
+                        update_view(action=f"Claiming {place_name} (API)...")
+                        sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
+                        sys.stdout.flush()
+                        logger.info(f"[API] Claiming {place_name} - Clicks: {target_click:,}...")
 
-                    res = client.open_chest(chest_to_open, target_click)
-                    if client.token != token:
-                        token = client.token
-                        token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
+                        res = client.open_chest(chest_to_open, target_click)
+                        if client.token != token:
+                            token = client.token
+                            token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
+                finally:
+                    is_claiming_chest = False
 
                 if res and res.get("code") == 0:
                     claim_failures[chest_to_open] = 0
@@ -2501,9 +3061,14 @@ def main():
                         total_consume += consume
 
                     try:
-                        bag_after = build_bag_snapshot(client.get_bag_list())
+                        bag_raw = client.get_bag_list()
+                        bag_after = build_bag_snapshot(bag_raw)
+                        refresh_collection_state(client, bag_items=bag_raw, fetch_atlas=False)
                     except Exception:
                         pass
+
+                    live_balance_ref["total_clicks"] = max(live_balance_ref["total_clicks"], total_clicks)
+                    live_balance_ref["total_consume"] = max(live_balance_ref["total_consume"], total_consume)
 
                     is_new, new_qty = evaluate_bag_reward(bag_before, asset_id=asset_id, asset_name=asset, bag_after=bag_after)
                     next_ts_val = left_ts if chest_to_open == "left" else right_ts
@@ -2513,6 +3078,7 @@ def main():
 
                     item_type = classify_asset_type(asset_type_raw, asset)
                     rarity_str = rarity.capitalize() if rarity else "Common"
+                    record_claim_stat(place_name, asset, item_type, rarity_str, is_new, new_qty)
                     status_badge = "[NEW]" if is_new is True else (f"[DUP x{new_qty}]" if is_new is False and new_qty else ("[DUP]" if is_new is False else "[CLAIMED]"))
                     last_claim_msg = f"{place_name} {status_badge} {item_type}: {asset} ({rarity_str})"
 
