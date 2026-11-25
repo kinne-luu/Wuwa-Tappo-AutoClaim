@@ -9,6 +9,7 @@ import datetime
 import hashlib
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import random
 import re
@@ -98,8 +99,9 @@ def init_ssl_ca_bundle() -> str:
 CA_BUNDLE_PATH = init_ssl_ca_bundle()
 
 
-PROJECT_NAME = "Wuwa Tappo Auto Claim"
-APP_VERSION = "1.0.0"
+PROJECT_NAME = "WuwaTappo AutoClaim"
+PROJECT_AUTHOR = "kinne-luu"
+APP_VERSION = "1.1.0"
 
 
 if getattr(sys, "frozen", False):
@@ -143,7 +145,7 @@ custom_game_path = ""
 
 logger = logging.getLogger("AutoClaim")
 logger.setLevel(logging.DEBUG)
-file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8")
 file_handler.setLevel(logging.DEBUG)
 file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 file_handler.setFormatter(file_formatter)
@@ -181,11 +183,11 @@ class Color:
 
 
 def set_console_icon():
-    """Sets Zani icon for Console window HWND and sets explicit AppUserModelID."""
+    """Sets window icon for Console HWND and sets explicit AppUserModelID."""
     if os.name != "nt":
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("WuwaTappo.AutoClaim.Zani.1.0.0")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(PROJECT_NAME)
     except Exception:
         pass
 
@@ -225,6 +227,14 @@ def init_terminal():
             mode = ctypes.c_ulong()
             if kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode)):
                 kernel32.SetConsoleMode(h_stdout, mode.value | 0x0004)
+            # Disable QuickEdit Mode on stdin so clicking the console never freezes output ("Select ...")
+            h_stdin = kernel32.GetStdHandle(-10)
+            in_mode = ctypes.c_ulong()
+            if kernel32.GetConsoleMode(h_stdin, ctypes.byref(in_mode)):
+                ENABLE_QUICK_EDIT_MODE = 0x0040
+                ENABLE_EXTENDED_FLAGS = 0x0080
+                new_in_mode = (in_mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+                kernel32.SetConsoleMode(h_stdin, new_in_mode)
             kernel32.SetConsoleTitleW(f"{PROJECT_NAME} v{APP_VERSION}")
             sys.stdout.write("\033[?25l")
             sys.stdout.flush()
@@ -612,8 +622,8 @@ def hide_window(notify_user: bool = True):
     if notify_user and tray_icon:
         try:
             tray_icon.notify(
-                "Wuwa Tappo Auto Claim is running in System Tray.\nClick icon to restore window.",
-                "Wuwa Tappo Auto Claim",
+                f"{PROJECT_NAME} is running in System Tray.\nClick icon to restore window.",
+                PROJECT_NAME,
             )
         except Exception:
             pass
@@ -676,7 +686,7 @@ def toggle_autostart(icon=None, item=None):
         if tray_icon:
             try:
                 tray_icon.update_menu()
-                tray_icon.notify(msg, "Wuwa Tappo Auto Claim")
+                tray_icon.notify(msg, PROJECT_NAME)
             except Exception:
                 pass
 
@@ -722,7 +732,7 @@ def init_tray():
     tray_icon = pystray.Icon(
         "WuwaTappoAutoClaim",
         create_tray_icon_image(),
-        "Wuwa Tappo Auto Claim",
+        PROJECT_NAME,
         menu,
     )
     t = threading.Thread(target=tray_icon.run, daemon=True)
@@ -1048,6 +1058,24 @@ def get_asset_url(asset_name: str) -> str:
     return f"{base}/{asset_name}"
 
 
+def classify_asset_type(asset_type: str = "", asset_name: str = "") -> str:
+    t = str(asset_type or "").strip().lower()
+    if t in ("character_skin", "character", "role"):
+        return "Character"
+    if t == "accessory":
+        return "Accessory"
+    if t == "emote":
+        return "Emote"
+    n = str(asset_name or "").strip().lower()
+    if n.startswith("role"):
+        return "Character"
+    if n.startswith("accessory"):
+        return "Accessory"
+    if n.startswith("emote"):
+        return "Emote"
+    return t.capitalize() if t else "Item"
+
+
 def send_discord_webhook(
     webhook_url: str,
     nickname: str,
@@ -1057,6 +1085,10 @@ def send_discord_webhook(
     balance: int,
     left_wait_sec: int,
     right_wait_sec: int,
+    asset_type: str = "",
+    is_new: bool = None,
+    quantity: int = None,
+    claim_mode: str = "",
 ):
 
     if not webhook_url or not webhook_url.startswith("https://discord.com/api/webhooks/"):
@@ -1072,24 +1104,32 @@ def send_discord_webhook(
     embed_color = color_map.get(rarity_lower, 0x5865F2)
     image_url = get_asset_url(asset_name)
     place_label = "Chest #1" if place == "left" else "Chest #2"
+    item_type = classify_asset_type(asset_type, asset_name)
+    status_tag = "NEW!" if is_new is True else (f"Duplicate (x{quantity})" if is_new is False and quantity else ("Duplicate" if is_new is False else "Claimed"))
+
+    fields = [
+        {"name": "Player", "value": nickname, "inline": True},
+        {"name": "Chest", "value": place_label, "inline": True},
+        {"name": "Status", "value": status_tag, "inline": True},
+        {"name": "Type", "value": item_type, "inline": True},
+        {"name": "Rarity", "value": rarity.capitalize() if rarity else "Common", "inline": True},
+        {"name": "Reward Item", "value": f"`{asset_name}`", "inline": True},
+        {"name": "Balance", "value": f"{balance:,} clicks", "inline": True},
+    ]
+    if claim_mode:
+        fields.append({"name": "Mode", "value": claim_mode, "inline": True})
+    fields.append({
+        "name": "Next Cooldowns",
+        "value": f"Left: `{format_duration(left_wait_sec)}` | Right: `{format_duration(right_wait_sec)}`",
+        "inline": False,
+    })
 
     embed = {
-        "title": f"{place_label} Claimed Successfully!",
+        "title": f"{place_label} Claimed — {status_tag}",
         "color": embed_color,
-        "fields": [
-            {"name": "Player", "value": nickname, "inline": True},
-            {"name": "Chest", "value": place_label, "inline": True},
-            {"name": "Rarity", "value": rarity.capitalize() if rarity else "Common", "inline": True},
-            {"name": "Reward Item", "value": f"`{asset_name}`", "inline": True},
-            {"name": "Balance", "value": f"{balance:,} clicks", "inline": True},
-            {
-                "name": "Next Cooldowns",
-                "value": f"Left: `{format_duration(left_wait_sec)}` | Right: `{format_duration(right_wait_sec)}`",
-                "inline": False,
-            },
-        ],
+        "fields": fields,
         "footer": {
-            "text": f"{PROJECT_NAME} - {PROJECT_AUTHOR}",
+            "text": f"{PROJECT_NAME} v{APP_VERSION} - {PROJECT_AUTHOR}",
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -1098,7 +1138,7 @@ def send_discord_webhook(
         embed["thumbnail"] = {"url": image_url}
 
     payload = {
-        "username": f"Wuwa Tappo Auto Claim (Desktop v{APP_VERSION})",
+        "username": f"{PROJECT_NAME} (v{APP_VERSION})",
         "avatar_url": "https://aki-gm-resources-back.aki-game.net/head_photo/82001501.png",
         "embeds": [embed],
     }
@@ -1143,17 +1183,27 @@ class WuwaTappoClient:
         if CA_BUNDLE_PATH and os.path.exists(CA_BUNDLE_PATH):
             kwargs.setdefault("verify", CA_BUNDLE_PATH)
 
-        try:
-            return self.session.request(method, url, **kwargs)
-        except OSError as e:
-            if "certificate bundle" in str(e).lower() or "cacert" in str(e).lower():
-                logger.warning(f"TLS certificate bundle corrupted or purged by OS ({e}). Repairing persistent bundle...")
-                CA_BUNDLE_PATH = init_ssl_ca_bundle()
-                if CA_BUNDLE_PATH and os.path.exists(CA_BUNDLE_PATH):
-                    kwargs["verify"] = CA_BUNDLE_PATH
-                    self.session.verify = CA_BUNDLE_PATH
-                    return self.session.request(method, url, **kwargs)
-            raise
+        for attempt in range(2):
+            try:
+                return self.session.request(method, url, **kwargs)
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.ChunkedEncodingError) as e:
+                if attempt == 0:
+                    logger.debug(f"Transient network error ({e}), retrying once...")
+                    time.sleep(1.0)
+                    self.session = requests.Session()
+                    if CA_BUNDLE_PATH and os.path.exists(CA_BUNDLE_PATH):
+                        self.session.verify = CA_BUNDLE_PATH
+                    continue
+                raise
+            except OSError as e:
+                if "certificate bundle" in str(e).lower() or "cacert" in str(e).lower():
+                    logger.warning(f"TLS certificate bundle corrupted or purged by OS ({e}). Repairing persistent bundle...")
+                    CA_BUNDLE_PATH = init_ssl_ca_bundle()
+                    if CA_BUNDLE_PATH and os.path.exists(CA_BUNDLE_PATH):
+                        kwargs["verify"] = CA_BUNDLE_PATH
+                        self.session.verify = CA_BUNDLE_PATH
+                        return self.session.request(method, url, **kwargs)
+                raise
 
     def try_refresh_token(self) -> bool:
 
@@ -1165,7 +1215,7 @@ class WuwaTappoClient:
             global tray_icon
             if tray_icon:
                 try:
-                    tray_icon.notify("Session token was refreshed automatically.", "Wuwa Tappo Auto Claim")
+                    tray_icon.notify("Session token was refreshed automatically.", PROJECT_NAME)
                 except Exception:
                     pass
             return True
@@ -1191,6 +1241,27 @@ class WuwaTappoClient:
             raise Exception(f"Account query error: {res.get('message', res)}")
         return res["data"]
 
+    def get_bag_list(self) -> list:
+        r = self._safe_request("POST", f"{SERVICE_BASE}/api/frontend/bags/list", headers=self._headers(), json={})
+        res = r.json()
+        if res.get("code") in (10002, 10003, 90002):
+            if self.try_refresh_token():
+                r = self._safe_request("POST", f"{SERVICE_BASE}/api/frontend/bags/list", headers=self._headers(), json={})
+                res = r.json()
+        if res.get("code") != 0:
+            return []
+        data = res.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for k in ("list", "items", "bags", "assets", "appearances"):
+                if isinstance(data.get(k), list):
+                    return data[k]
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+        return []
+
     def open_chest(self, place, click_num):
 
         payload = {"place": place, "click_num": click_num}
@@ -1202,6 +1273,47 @@ class WuwaTappoClient:
                 r = self._safe_request("POST", f"{SERVICE_BASE}/api/frontend/chests/open", headers=self._headers(), json=payload)
                 res = r.json()
         return res
+
+
+def build_bag_snapshot(bag_items: list) -> dict:
+    snap = {}
+    for it in bag_items or []:
+        if not isinstance(it, dict):
+            continue
+        aid = it.get("asset_id") or it.get("id")
+        key = f"id:{aid}" if aid else f"name:{it.get('asset_name', '')}"
+        snap[key] = {
+            "asset_id": aid,
+            "asset_name": it.get("asset_name") or it.get("name") or "Unknown",
+            "asset_type": it.get("asset_type") or it.get("type") or "",
+            "rarity_type": it.get("rarity_type") or it.get("rarity") or "common",
+            "quantity": int(it.get("quantity") or it.get("num") or 1),
+        }
+    return snap
+
+
+def evaluate_bag_reward(bag_before: dict, asset_id=None, asset_name: str = "", bag_after: dict = None):
+    """Determine if a reward is NEW or DUPLICATE (and updated quantity)."""
+    if not bag_before and not bag_after:
+        return None, None
+    key = f"id:{asset_id}" if asset_id else (f"name:{asset_name}" if asset_name else None)
+    if key:
+        prev = bag_before.get(key)
+        curr = (bag_after or {}).get(key)
+        if prev is None:
+            return True, (curr["quantity"] if curr else 1)
+        prev_qty = prev.get("quantity", 0)
+        new_qty = curr["quantity"] if curr else (prev_qty + 1)
+        return (prev_qty <= 0), new_qty
+    # Fallback: diff bag_before vs bag_after
+    if bag_after:
+        for k, curr in bag_after.items():
+            prev = bag_before.get(k)
+            if prev is None:
+                return True, curr.get("quantity", 1)
+            if curr.get("quantity", 0) > prev.get("quantity", 0):
+                return False, curr.get("quantity", 1)
+    return None, None
 
 
 def format_duration(seconds: int) -> str:
@@ -1370,82 +1482,103 @@ def ensure_admin():
 
 
 def setup_pet_sync():
-    """Apply WebView2 debugging registry policy ONLY for WuwaTappo.exe."""
+    """Temporarily apply WebView2 debugging policy ONLY for WuwaTappo.exe (required because
+    Tauri v2 sets AdditionalBrowserArguments programmatically, which overrides env vars).
+    Cleaned up immediately after CDP binds and on exit.
+    """
     if os.name != "nt":
         return
     arg = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*"
-    try:
-        key_lm = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY)
-        winreg.SetValueEx(key_lm, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
+    for root, name in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")):
         try:
-            winreg.DeleteValue(key_lm, "*")
-        except Exception:
-            pass
-        winreg.CloseKey(key_lm)
-    except Exception as e:
-        logger.debug(f"Failed to write HKLM policy: {e}")
-
-    try:
-        key_cu = winreg.CreateKey(winreg.HKEY_CURRENT_USER, POLICY_KEY)
-        winreg.SetValueEx(key_cu, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
-        try:
-            winreg.DeleteValue(key_cu, "*")
-        except Exception:
-            pass
-        winreg.CloseKey(key_cu)
-    except Exception as e:
-        logger.debug(f"Failed to write HKCU policy: {e}")
+            key = winreg.CreateKey(root, POLICY_KEY)
+            winreg.SetValueEx(key, "WuwaTappo.exe", 0, winreg.REG_SZ, arg)
+            try:
+                winreg.DeleteValue(key, "*")
+            except Exception:
+                pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            logger.debug(f"Failed to write {name} policy: {e}")
 
 
 def cleanup_registry_policy():
-    """Remove all WebView2 debugging registry keys (HKLM and HKCU) for a zero footprint."""
+    """Remove any leftover WebView2 debugging registry keys (HKLM and HKCU) for zero footprint."""
     if os.name != "nt":
         return
-    try:
-        key_lm = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY, 0, winreg.KEY_SET_VALUE)
-        winreg.DeleteValue(key_lm, "WuwaTappo.exe")
-        winreg.DeleteValue(key_lm, "*")
-        winreg.CloseKey(key_lm)
-    except Exception:
-        pass
-    try:
-        winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, POLICY_KEY)
-    except Exception:
-        pass
-
-    try:
-        key_cu = winreg.OpenKey(winreg.HKEY_CURRENT_USER, POLICY_KEY, 0, winreg.KEY_SET_VALUE)
-        winreg.DeleteValue(key_cu, "WuwaTappo.exe")
-        winreg.DeleteValue(key_cu, "*")
-        winreg.CloseKey(key_cu)
-    except Exception:
-        pass
-    try:
-        winreg.DeleteKey(winreg.HKEY_CURRENT_USER, POLICY_KEY)
-    except Exception:
-        pass
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            key = winreg.OpenKey(root, POLICY_KEY, 0, winreg.KEY_SET_VALUE)
+            for val in ("WuwaTappo.exe", "*"):
+                try:
+                    winreg.DeleteValue(key, val)
+                except Exception:
+                    pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+        try:
+            winreg.DeleteKey(root, POLICY_KEY)
+        except Exception:
+            pass
 
 
 def is_cdp_ready() -> bool:
     """Check if WebView2 CDP debugging port is accessible."""
     try:
-        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=0.5)
+        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json/version", timeout=0.6)
         return resp.status_code == 200
     except Exception:
         return False
 
 
+def find_cdp_main_target() -> str:
+    """Return WebSocket debugger URL for ONLY the main Wuwa Tappo pet window (index.html#/)."""
+    try:
+        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json", timeout=1.0)
+        targets = resp.json()
+    except Exception:
+        return None
+
+    fallback_ws = None
+    for t in targets:
+        if t.get("type") != "page":
+            continue
+        ws_url = t.get("webSocketDebuggerUrl")
+        if not ws_url:
+            continue
+        url = (t.get("url") or "").lower()
+        if "tauri.localhost" not in url and "wuwatappo" not in (t.get("title") or "").lower():
+            continue
+        # Skip secondary windows (panel, login, toast, update, maintenance)
+        if any(sub in url for sub in ("#/panel", "#/login", "#/toast", "#/update", "#/maintenance")):
+            continue
+        if url.endswith("#/") or url.endswith("index.html") or "index.html#/" in url:
+            return ws_url
+        if not fallback_ws:
+            fallback_ws = ws_url
+    return fallback_ws
+
+
 def restart_pet_if_needed():
-    """Automatically activate CDP Port on Wuwa Tappo so pet UI stays in sync."""
+    """Ensure running Wuwa Tappo has CDP port open for Native In-App Auto-Click."""
     global pet_sync_enabled
-    if not is_app_running():
+    c = Color
+    if not pet_sync_enabled:
         return
-    if is_cdp_ready():
-        pet_sync_enabled = True
+    if not is_app_running():
+        print(f"  {c.PASTEL_GRAY}[*] Wuwa Tappo is not running -> Headless API Mode.{c.RESET}", flush=True)
+        logger.info("Wuwa Tappo is not running — starting in Clean Headless API Mode.")
+        return
+    if is_cdp_ready() and find_cdp_main_target():
+        print(f"  {c.PASTEL_GREEN}[+] Connected to Wuwa Tappo CDP port {CDP_PORT} (Native Click Mode).{c.RESET}", flush=True)
+        logger.info(f"Connected to existing Wuwa Tappo CDP port {CDP_PORT} (Native Click Mode).")
+        cleanup_registry_policy()
         return
 
-    pet_sync_enabled = True
-    logger.info(f"Restarting Wuwa Tappo to bind CDP port {CDP_PORT}...")
+    print(f"  {c.PASTEL_CYAN}[*] Restarting Wuwa Tappo to attach CDP port {CDP_PORT}...{c.RESET}", flush=True)
+    logger.info(f"Restarting Wuwa Tappo with CDP port {CDP_PORT} for Native In-App Auto-Click...")
+    setup_pet_sync()
     app_exe = None
     tappo_pids = set()
     my_pid = os.getpid()
@@ -1473,7 +1606,7 @@ def restart_pet_if_needed():
         except Exception:
             pass
 
-    time.sleep(1.2)
+    time.sleep(1.5)
 
     if not app_exe or not os.path.exists(app_exe):
         app_exe = find_wuwa_tappo_exe()
@@ -1484,86 +1617,175 @@ def restart_pet_if_needed():
             env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--remote-debugging-port={CDP_PORT} --remote-allow-origins=*"
             cwd = os.path.dirname(app_exe)
             subprocess.Popen([app_exe], env=env, cwd=cwd)
-            for _ in range(8):
+            for sec in range(1, 21):
                 time.sleep(1)
-                if is_cdp_ready():
+                sys.stdout.write(f"\r  {c.PASTEL_GRAY}[*] Waiting for Wuwa Tappo CDP... ({sec}s/20s){c.RESET}")
+                sys.stdout.flush()
+                if is_cdp_ready() and find_cdp_main_target():
                     cleanup_registry_policy()
-                    logger.info(f"Wuwa Tappo Pet CDP port {CDP_PORT} initialized successfully!")
-                    break
+                    print(f"\r  {c.PASTEL_GREEN}[+] Wuwa Tappo CDP port {CDP_PORT} ready (Native Click Mode)!   {c.RESET}", flush=True)
+                    logger.info(f"Wuwa Tappo Pet CDP port {CDP_PORT} ready (Native Click Mode)!")
+                    return
+            cleanup_registry_policy()
+            print(f"\r  {c.PASTEL_YELLOW}[!] Wuwa Tappo started, but CDP port {CDP_PORT} did not respond.  {c.RESET}", flush=True)
+            logger.warning(f"Wuwa Tappo started, but CDP port {CDP_PORT} did not respond within 20s.")
         except Exception as e:
             cleanup_registry_policy()
-            logger.debug(f"Could not relaunch Wuwa Tappo: {e}")
+            print(f"\n  {c.RED}[-] Could not relaunch Wuwa Tappo: {e}{c.RESET}", flush=True)
+            logger.warning(f"Could not relaunch Wuwa Tappo with CDP: {e}")
 
 
-def sync_pet_ui(gross: int = 0, consumed: int = 0, left_ts: int = 0, right_ts: int = 0) -> bool:
-    """Synchronize pet state via CDP:
-    Inject JS directly into Vue/Pinia store for zero flicker and instant update.
-    Fallbacks to Page.reload if store injection fails.
-    """
-    if not is_app_running() or not is_cdp_ready():
-        return False
+def get_pet_live_state() -> dict:
+    """Read live state (click counts, chest button readiness) from the main Pet window via CDP."""
+    ws_url = find_cdp_main_target()
+    if not ws_url:
+        return None
     try:
         import websockets
 
-        resp = requests.get(f"http://127.0.0.1:{CDP_PORT}/json", timeout=1.0)
-        targets = resp.json()
-
-        patch_js = f"""
-        (() => {{
-            try {{
+        inspect_js = """
+        (() => {
+            const leftBtn = document.querySelector('.reward-anchor--left button.reward-btn');
+            const rightBtn = document.querySelector('.reward-anchor--right button.reward-btn');
+            let storeData = null;
+            try {
                 const app = document.querySelector('#app');
                 const pinia = app?.__vue_app__?.config?.globalProperties?.$pinia;
                 const store = pinia?._s?.get('GlobalState');
-                if (store && store.userInfo && typeof store.$patch === 'function') {{
-                    const patchData = {{
-                        userInfo: {{
-                            ...store.userInfo,
-                            total_click_count: {gross},
-                            total_click_consume: {consumed}
-                        }}
-                    }};
-                    if ({left_ts} > 0) patchData.userInfo.left_treasure_chest = {left_ts};
-                    if ({right_ts} > 0) patchData.userInfo.right_treasure_chest = {right_ts};
-                    store.$patch(patchData);
-                    return true;
-                }}
-            }} catch (e) {{}}
-            return false;
-        }})();
+                if (store) {
+                    storeData = {
+                        isLoggedIn: !!store.isLoggedIn,
+                        totalClickCount: Number(store.totalClickCount ?? 0),
+                        cumulativeClickCount: Number(store.cumulativeClickCount ?? 0),
+                        localClickCount: Number(store.localClickCount ?? 0),
+                        serverClickTotal: Number(store.userInfo?.total_click_count ?? 0),
+                        serverClickConsume: Number(store.userInfo?.total_click_consume ?? 0),
+                        leftTs: Number(store.userInfo?.left_treasure_chest ?? 0),
+                        rightTs: Number(store.userInfo?.right_treasure_chest ?? 0),
+                    };
+                }
+            } catch (e) {}
+            return {
+                leftReady: !!(leftBtn && !leftBtn.disabled),
+                rightReady: !!(rightBtn && !rightBtn.disabled),
+                store: storeData,
+            };
+        })();
         """
 
-        synced = False
-        for target in targets:
-            url = target.get("url", "").lower()
-            title = target.get("title", "").lower()
-            ws_url = target.get("webSocketDebuggerUrl")
+        async def _query():
+            async with websockets.connect(ws_url, close_timeout=2, max_size=2 * 1024 * 1024) as ws:
+                await ws.send(json.dumps({
+                    "id": 1,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": inspect_js, "returnByValue": True},
+                }))
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=max(0.2, deadline - time.monotonic()))
+                    msg = json.loads(raw)
+                    if msg.get("id") == 1:
+                        return msg.get("result", {}).get("result", {}).get("value")
+            return None
 
-            if ws_url and ("tauri" in url or "wuwatappo" in title or "kuro" in url or "localhost" in url):
-                async def _send(endpoint):
-                    async with websockets.connect(endpoint, close_timeout=2) as ws:
-                        # Luôn reload nhẹ lại WebView2 (0.1s không giật) để Pinia tự fetch lại /user/me sạch 100%
-                        reload_cmd = {"id": 1, "method": "Page.reload", "params": {"ignoreCache": False}}
-                        await ws.send(json.dumps(reload_cmd))
-                        try:
-                            await asyncio.wait_for(ws.recv(), timeout=1.0)
-                        except Exception:
-                            pass
-                        return True
-
-                synced = asyncio.run(_send(ws_url)) or synced
-
-        if synced:
-            logger.info(f"[Sync] Wuwa Tappo Pet UI synchronized successfully via CDP port {CDP_PORT}!")
-        return synced
+        return asyncio.run(_query())
     except Exception as e:
-        logger.debug(f"CDP sync error: {e}")
-        return False
+        logger.debug(f"get_pet_live_state error: {e}")
+        return None
 
 
-def notify_app_refresh(gross: int = 0, consumed: int = 0, left_ts: int = 0, right_ts: int = 0):
-    """Automatically refresh Pet state via DevTools CDP (Pinia store patch with reload fallback)."""
-    if is_app_running() and is_cdp_ready():
-        sync_pet_ui(gross=gross, consumed=consumed, left_ts=left_ts, right_ts=right_ts)
+def claim_chest_via_cdp(place: str, timeout_sec: float = 10.0) -> dict:
+    """Trigger the real in-app chest button click via CDP and capture the exact /chests/open response.
+    Zero Page.reload, zero click desync (70003/80022), full animation + NEW bag badge!
+    Returns dict: {"status": "ok"|"api_error"|"not_ready"|"error", "response": ..., "detail": ...}
+    """
+    ws_url = find_cdp_main_target()
+    if not ws_url:
+        return {"status": "error", "detail": "CDP main target not found"}
+
+    selector = f".reward-anchor--{place} button.reward-btn"
+    click_js = f"""
+    (() => {{
+        const btn = document.querySelector('{selector}');
+        if (!btn) return {{ clicked: false, reason: 'button_not_found' }};
+        if (btn.disabled) return {{ clicked: false, reason: 'button_disabled' }};
+        btn.click();
+        return {{ clicked: true }};
+    }})();
+    """
+
+    try:
+        import websockets
+
+        async def _run():
+            async with websockets.connect(ws_url, close_timeout=2, max_size=4 * 1024 * 1024) as ws:
+                # 1. Enable CDP Network events to capture exact api/frontend/chests/open response
+                await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
+                # 2. Click the real chest button inside Vue app
+                await ws.send(json.dumps({
+                    "id": 2,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": click_js, "returnByValue": True},
+                }))
+
+                chest_req_id = None
+                body_requested = False
+                click_confirmed = False
+                deadline = time.monotonic() + timeout_sec
+
+                try:
+                    while time.monotonic() < deadline:
+                        rem = max(0.2, deadline - time.monotonic())
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=rem)
+                        except asyncio.TimeoutError:
+                            break
+                        msg = json.loads(raw)
+
+                        if msg.get("id") == 2:
+                            val = msg.get("result", {}).get("result", {}).get("value") or {}
+                            if not val.get("clicked"):
+                                return {"status": "not_ready", "detail": val.get("reason", "not_clickable")}
+                            click_confirmed = True
+
+                        elif msg.get("method") == "Network.responseReceived":
+                            params = msg.get("params", {})
+                            url = (params.get("response", {}).get("url") or "").lower()
+                            if "api/frontend/chests/open" in url:
+                                chest_req_id = params.get("requestId")
+
+                        elif msg.get("method") == "Network.loadingFinished" and chest_req_id and not body_requested:
+                            if msg.get("params", {}).get("requestId") == chest_req_id:
+                                body_requested = True
+                                await ws.send(json.dumps({
+                                    "id": 3,
+                                    "method": "Network.getResponseBody",
+                                    "params": {"requestId": chest_req_id},
+                                }))
+
+                        elif msg.get("id") == 3:
+                            res_obj = msg.get("result") or {}
+                            body_str = res_obj.get("body", "")
+                            if res_obj.get("base64Encoded"):
+                                body_str = base64.b64decode(body_str).decode("utf-8", errors="replace")
+                            parsed = json.loads(body_str) if body_str else {}
+                            if parsed.get("code") == 0:
+                                return {"status": "ok", "response": parsed}
+                            return {"status": "api_error", "response": parsed, "detail": parsed.get("message", str(parsed))}
+                finally:
+                    try:
+                        await ws.send(json.dumps({"id": 99, "method": "Network.disable"}))
+                    except Exception:
+                        pass
+
+                if click_confirmed:
+                    return {"status": "clicked_no_body", "detail": "Clicked button in Pet UI; timed out waiting for network body"}
+                return {"status": "error", "detail": "Timed out before click confirmation"}
+
+        return asyncio.run(_run())
+    except Exception as e:
+        logger.debug(f"claim_chest_via_cdp error: {e}")
+        return {"status": "error", "detail": str(e)}
 
 
 def cleanup_app_exit():
@@ -1640,6 +1862,7 @@ def build_dashboard_lines(
     interval: int = 10,
     total_duration: int = 1800,
     last_claim_msg: str = "",
+    claim_mode: str = "",
 ) -> list:
     c = Color
     delays = delays or {"left": 0, "right": 0}
@@ -1720,6 +1943,8 @@ def build_dashboard_lines(
     lines.append("")
 
     # Block 2: Engine & Timing Config (Pastel Pink bar)
+    mode_disp = claim_mode or ("CDP Native-Click (Pet Synced)" if app_running else "Headless API Mode")
+    lines.append(row(c.PASTEL_PINK, "Mode", f"{c.BOLD}{c.PASTEL_GREEN}{mode_disp}{c.RESET}"))
     lines.append(row(c.PASTEL_PINK, "State", f"{c.BOLD}{c.PASTEL_CYAN}{current_action}{c.RESET}"))
     lines.append(row(c.PASTEL_PINK, "Jitter", f"{c.WHITE}{min_delay}s - {max_delay}s{c.RESET} {c.PASTEL_GRAY}│ Min Interval: {interval}s{c.RESET}"))
     lines.append("")
@@ -1737,13 +1962,13 @@ def build_dashboard_lines(
 
     lines.append("")
 
-    # Footer: Color dots palette & mascot
+    # Footer: Color dots palette & status
     dots = (
         f"\033[38;5;117m● \033[38;5;110m● \033[38;5;75m● \033[38;5;153m● "
         f"\033[38;5;255m● \033[38;5;218m● \033[38;5;212m●{c.RESET}"
     )
     lines.append(f"  {dots}")
-    lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« Zani is working hard diligently! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
+    lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« {PROJECT_NAME} is running smoothly! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
     lines.append(f"  {c.PASTEL_GRAY}[H] Hide to Tray    [S] Settings    [L] View Logs    [Q] Quit{c.RESET}")
     lines.append("")
 
@@ -1779,6 +2004,7 @@ def redraw_screen(
     max_delay: int = 60,
     interval: int = 10,
     total_duration: int = 1800,
+    claim_mode: str = "",
 ):
 
     global is_window_visible
@@ -1806,6 +2032,7 @@ def redraw_screen(
         interval=interval,
         total_duration=total_duration,
         last_claim_msg=last_claim_msg,
+        claim_mode=claim_mode,
     ))
 
     content = "\n".join(lines)
@@ -1817,8 +2044,46 @@ def redraw_screen(
     sys.stdout.flush()
 
 
+_instance_mutex_handle = None
+
+
+def acquire_single_instance_mutex() -> bool:
+    """Prevent multiple instances of WuwaTappo AutoClaim from running concurrently."""
+    global _instance_mutex_handle
+    if os.name != "nt":
+        return True
+    try:
+        h = kernel32.CreateMutexW(None, False, "Local\\WuwaTappoAutoClaim_SingleInstance")
+        last_err = kernel32.GetLastError()
+        if not h:
+            return True
+        if last_err == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(h)
+            return False
+        _instance_mutex_handle = h
+        return True
+    except Exception:
+        return True
+
+
+def merge_chest_ts(*candidates) -> int:
+    """Monotonically pick the newest valid chest timestamp (> 0) so cached /user/me responses never roll timers backward."""
+    valid = []
+    for x in candidates:
+        try:
+            v = int(x or 0)
+            if v > 0:
+                valid.append(v)
+        except Exception:
+            pass
+    return max(valid) if valid else 0
+
+
 def main():
+    global pet_sync_enabled
     cli_args = parse_cli_args()
+    if cli_args and getattr(cli_args, "no_sync", False):
+        pet_sync_enabled = False
 
     if cli_args and cli_args.status_only:
         token, cid, webhook_url, token_src, cid_src, show_window_cfg, min_delay_sec, max_delay_sec, min_chest_interval_sec = load_config(cli_args)
@@ -1826,6 +2091,7 @@ def main():
         try:
             user = client.get_user_info()
             server_time = client.get_server_time()
+            bag_items = client.get_bag_list()
         except Exception as e:
             print(f"Error fetching account info: {e}")
             sys.exit(1)
@@ -1835,6 +2101,9 @@ def main():
         total_consume = user.get("total_click_consume", 0)
         left_ts = user.get("left_treasure_chest", 0)
         right_ts = user.get("right_treasure_chest", 0)
+        pet_on = is_app_running()
+        cdp_on = is_cdp_ready() if pet_on else False
+        mode_str = "CDP Native-Click (Ready)" if (pet_on and cdp_on) else ("Pet Open (CDP Not Attached Yet)" if pet_on else "Headless API Mode")
 
         lines = build_banner_lines()
         lines.extend(build_dashboard_lines(
@@ -1845,22 +2114,40 @@ def main():
             left_ts=left_ts,
             right_ts=right_ts,
             now_ts=server_time,
-            app_running=is_app_running(),
+            app_running=pet_on,
             cid_str=f"{cid[:6]}...{cid[-6:]}",
             current_action="Snapshot Check (--status)",
             min_delay=min_delay_sec,
             max_delay=max_delay_sec,
             interval=min_chest_interval_sec,
+            claim_mode=mode_str,
         ))
         print("\n".join(lines))
+        if bag_items:
+            counts = {}
+            qty_sum = 0
+            for it in bag_items:
+                if not isinstance(it, dict):
+                    continue
+                t = classify_asset_type(it.get("asset_type", ""), it.get("asset_name", ""))
+                counts[t] = counts.get(t, 0) + 1
+                qty_sum += int(it.get("quantity") or it.get("num") or 1)
+            summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items()))
+            print(f"  Bag Summary: {len(bag_items)} unique ({summary}) | Total quantity: {qty_sum}\n")
         sys.exit(0)
 
-    ensure_admin()
-    setup_pet_sync()
+    if pet_sync_enabled and is_app_running() and not is_cdp_ready():
+        ensure_admin()
+    if not acquire_single_instance_mutex():
+        print(f"  {Color.YELLOW}[!] {PROJECT_NAME} is already running in another window or System Tray.{Color.RESET}")
+        logger.warning("Duplicate instance detected — exiting cleanly.")
+        time.sleep(2.5)
+        sys.exit(0)
+
     init_terminal()
     render_banner()
     restart_pet_if_needed()
-    cleanup_registry_policy()
+    print(f"  {Color.GRAY}[*] Loading token and account info...{Color.RESET}", flush=True)
 
 
 
@@ -1876,16 +2163,24 @@ def main():
     cid_str = f"{cid[:6]}...{cid[-6:]}"
     has_webhook = bool(webhook_url)
 
+    time_offset = 0.0
+    last_clock_sync_mono = 0.0
+    last_wall_clock = time.time()
+
+    def sync_server_clock(silent: bool = False):
+        nonlocal time_offset, last_clock_sync_mono
+        try:
+            srv_ts = client.get_server_time()
+            time_offset = srv_ts - (time.time() * 1000)
+            last_clock_sync_mono = time.monotonic()
+            logger.info(f"Server time synchronized. Offset: {time_offset:+.1f}ms")
+        except Exception as e:
+            if not silent:
+                print(f"  {Color.RED}[-] Clock sync failed: {e}{Color.RESET}")
+            logger.warning(f"Clock sync failed: {e}")
+
     print(f"  {Color.GRAY}[*] Synchronizing clock with Kuro server...{Color.RESET}")
-    try:
-        server_time_init = client.get_server_time()
-        local_time_init = time.time() * 1000
-        time_offset = server_time_init - local_time_init
-        logger.info(f"Server time synchronized. Offset: {time_offset:+.1f}ms")
-    except Exception as e:
-        print(f"  {Color.RED}[-] Clock sync failed: {e}{Color.RESET}")
-        logger.error(f"Clock sync failed: {e}")
-        time_offset = 0
+    sync_server_clock(silent=False)
 
     def current_server_ts():
         return time.time() * 1000 + time_offset
@@ -1905,8 +2200,8 @@ def main():
     nickname = user.get("nickname", "User")
     total_clicks = user.get("total_click_count", 0)
     total_consume = user.get("total_click_consume", 0)
-    left_ts = user.get("left_treasure_chest", 0)
-    right_ts = user.get("right_treasure_chest", 0)
+    left_ts = merge_chest_ts(user.get("left_treasure_chest", 0))
+    right_ts = merge_chest_ts(user.get("right_treasure_chest", 0))
 
     chest_count = 0
     last_claim_msg = ""
@@ -1921,7 +2216,33 @@ def main():
     current_action = "Monitoring"
     last_chest_open_total = {"left": 1800, "right": 1800}
 
-    def update_view(override_claim_msg=None, in_place=False, action=None, total_duration=1800):
+    _mode_cache = {"ts": 0.0, "app_on": app_running, "cdp_on": False, "label": "Headless API Mode"}
+
+    def refresh_mode_status(force: bool = False):
+        nonlocal app_running
+        now_m = time.monotonic()
+        if not force and (now_m - _mode_cache["ts"]) < 10.0:
+            app_running = _mode_cache["app_on"]
+            return _mode_cache["app_on"], _mode_cache["cdp_on"], _mode_cache["label"]
+
+        pet_on = is_app_running()
+        cdp_on = False
+        if pet_on:
+            cdp_on = is_cdp_ready() and bool(find_cdp_main_target())
+            if cdp_on:
+                lbl = "CDP Native-Click (Pet Synced)"
+            elif pet_sync_enabled:
+                lbl = "Paused (Pet Open w/o CDP)"
+            else:
+                lbl = "Direct API (--no-sync)"
+        else:
+            lbl = "Headless API Mode"
+
+        app_running = pet_on
+        _mode_cache.update({"ts": now_m, "app_on": pet_on, "cdp_on": cdp_on, "label": lbl})
+        return pet_on, cdp_on, lbl
+
+    def update_view(override_claim_msg=None, in_place=False, action=None, total_duration=1800, force_mode=False):
         nonlocal current_action, last_claim_msg
         if is_setting_active:
             return
@@ -1930,6 +2251,7 @@ def main():
         if override_claim_msg is not None:
             last_claim_msg = override_claim_msg
 
+        _, _, mode_lbl = refresh_mode_status(force=force_mode)
         redraw_screen(
             nickname=nickname,
             balance=total_clicks - total_consume,
@@ -1950,38 +2272,64 @@ def main():
             max_delay=max_delay_sec,
             interval=min_chest_interval_sec,
             total_duration=total_duration,
+            claim_mode=mode_lbl,
         )
 
     global global_update_view_fn
     global_update_view_fn = update_view
 
-    update_view(action="Started Auto Claim")
+    update_view(action="Started Auto Claim", force_mode=True)
 
     if not show_window_cfg:
         hide_window(notify_user=False)
 
     claim_failures = {"left": 0, "right": 0}
+    not_ready_waits = {"left": 0, "right": 0}
+    last_claim_monotonic = 0.0
+    last_cdp_retry_monotonic = 0.0
 
     while running_flag:
         try:
-            now = current_server_ts()
-            left_cd = max(0, int((left_ts - now) / 1000))
-            right_cd = max(0, int((right_ts - now) / 1000))
+            # Detect PC Sleep/Hibernate wake or 60-minute periodic clock drift re-sync
+            wall_now = time.time()
+            if abs((wall_now - last_wall_clock) - 1.0) > 15.0 or (time.monotonic() - last_clock_sync_mono) > 3600:
+                sync_server_clock(silent=True)
+            last_wall_clock = wall_now
 
+            now = current_server_ts()
             target_left_ts = left_ts + (chest_delays["left"] * 1000)
             target_right_ts = right_ts + (chest_delays["right"] * 1000)
 
-            chest_to_open = None
-            if now >= target_left_ts:
-                chest_to_open = "left"
-            elif now >= target_right_ts:
-                chest_to_open = "right"
+            left_due = now >= target_left_ts
+            right_due = now >= target_right_ts
+            chest_to_open = "left" if left_due else ("right" if right_due else None)
 
             if chest_to_open:
+                # Enforce minimum interval between ANY two claims without freezing the dashboard
+                if last_claim_monotonic > 0:
+                    elapsed_since_claim = time.monotonic() - last_claim_monotonic
+                    if elapsed_since_claim < min_chest_interval_sec:
+                        rem_int = int(min_chest_interval_sec - elapsed_since_claim) + 1
+                        update_view(in_place=True, action=f"Interval cooldown ({rem_int}s)")
+                        time.sleep(1)
+                        continue
+
                 sys.stdout.write("\r" + " " * 75 + "\r")
                 sys.stdout.flush()
 
-                app_running = is_app_running()
+                app_running, cdp_active, _ = refresh_mode_status(force=True)
+
+                # Guard: if Pet is open without CDP and sync is enabled, do NOT send raw API claims behind Pet's back
+                if app_running and not cdp_active and pet_sync_enabled:
+                    if is_admin() and (time.monotonic() - last_cdp_retry_monotonic) > 30:
+                        last_cdp_retry_monotonic = time.monotonic()
+                        update_view(action="Re-attaching CDP to Wuwa Tappo...", force_mode=True)
+                        restart_pet_if_needed()
+                        app_running, cdp_active, _ = refresh_mode_status(force=True)
+                    if not cdp_active:
+                        update_view(in_place=True, action="Paused: Pet open w/o CDP (run as Admin or close Pet)")
+                        time.sleep(3)
+                        continue
 
                 try:
                     u = client.get_user_info()
@@ -1990,75 +2338,188 @@ def main():
                         token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
                     total_clicks = u.get("total_click_count", total_clicks)
                     total_consume = u.get("total_click_consume", total_consume)
-                    left_ts = u.get("left_treasure_chest", left_ts)
-                    right_ts = u.get("right_treasure_chest", right_ts)
+                    left_ts = merge_chest_ts(left_ts, u.get("left_treasure_chest"))
+                    right_ts = merge_chest_ts(right_ts, u.get("right_treasure_chest"))
 
                     now = current_server_ts()
-                    if chest_to_open == "left" and left_ts > now:
+                    target_left_ts = left_ts + (chest_delays["left"] * 1000)
+                    target_right_ts = right_ts + (chest_delays["right"] * 1000)
+                    left_due = now >= target_left_ts
+                    right_due = now >= target_right_ts
+                    if not left_due and not right_due:
                         update_view()
                         time.sleep(1)
                         continue
-                    if chest_to_open == "right" and right_ts > now:
-                        update_view()
-                        time.sleep(1)
-                        continue
+                    chest_to_open = "left" if left_due else "right"
                 except Exception as e:
                     logger.debug(f"Pre-claim user info sync failed: {e}")
 
-                # Đọc chính xác total_clicks hiện tại từ Server Kuro, không cộng thêm click ảo
-                target_click = total_clicks
-                min_needed = total_consume + CHEST_COST
-                if target_click < min_needed:
-                    target_click = min_needed
+                if cdp_active:
+                    # Smart readiness check & anti-starvation before clicking
+                    pet_state = get_pet_live_state()
+                    if pet_state:
+                        st = pet_state.get("store") or {}
+                        if st:
+                            left_ts = merge_chest_ts(left_ts, st.get("leftTs"))
+                            right_ts = merge_chest_ts(right_ts, st.get("rightTs"))
+                            if st.get("totalClickCount", 0) < CHEST_COST:
+                                update_view(in_place=True, action=f"Low balance ({st.get('totalClickCount', 0):,} < {CHEST_COST:,} clicks)")
+                                time.sleep(5)
+                                continue
+
+                        l_ready = bool(pet_state.get("leftReady"))
+                        r_ready = bool(pet_state.get("rightReady"))
+                        now = current_server_ts()
+                        left_due = now >= (left_ts + chest_delays["left"] * 1000)
+                        right_due = now >= (right_ts + chest_delays["right"] * 1000)
+
+                        if left_due and l_ready:
+                            chest_to_open = "left"
+                        elif right_due and r_ready:
+                            chest_to_open = "right"
+                        else:
+                            pending_side = "left" if left_due else ("right" if right_due else None)
+                            if not pending_side:
+                                update_view()
+                                time.sleep(1)
+                                continue
+                            not_ready_waits[pending_side] = not_ready_waits.get(pending_side, 0) + 1
+                            p_label = "Chest #1" if pending_side == "left" else "Chest #2"
+                            if not_ready_waits[pending_side] >= 5:
+                                chest_delays[pending_side] += 15
+                                not_ready_waits[pending_side] = 0
+                                logger.debug(f"[CDP] {p_label} button not visible after 5 checks — adding +15s delay buffer.")
+                            update_view(in_place=True, action=f"Waiting for {p_label} button in Pet UI...")
+                            time.sleep(2)
+                            continue
+
+                # Snapshot bag before opening to identify [NEW] vs [DUP xN]
+                bag_before = {}
+                try:
+                    bag_before = build_bag_snapshot(client.get_bag_list())
+                except Exception as e:
+                    logger.debug(f"Pre-claim bag snapshot failed: {e}")
 
                 place_name = "Chest #1" if chest_to_open == "left" else "Chest #2"
-                update_view(action=f"Claiming {place_name}...")
-                sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
-                sys.stdout.flush()
-                logger.info(f"Claiming {place_name} - Clicks: {target_click:,}...")
+                res = None
+                claim_mode_used = "CDP Native-Click" if cdp_active else "Headless API"
 
-                res = client.open_chest(chest_to_open, target_click)
-                if client.token != token:
-                    token = client.token
-                    token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
+                if cdp_active:
+                    update_view(action=f"Clicking {place_name} in Pet UI (CDP)...")
+                    logger.info(f"[CDP] Triggering native in-app click on {place_name}...")
+                    cdp_res = claim_chest_via_cdp(chest_to_open, timeout_sec=10.0)
+                    st_code = cdp_res.get("status")
 
-                if res.get("code") == 0:
+                    if st_code == "not_ready":
+                        logger.debug(f"[CDP] {place_name} button not ready yet ({cdp_res.get('detail')}). Waiting...")
+                        update_view(in_place=True, action=f"Waiting for {place_name} button in Pet UI...")
+                        time.sleep(2)
+                        continue
+                    elif st_code == "ok":
+                        res = cdp_res.get("response", {"code": 0, "data": {}})
+                    elif st_code == "clicked_no_body":
+                        # Button was clicked; verify via bags/list & user/me diff after short wait
+                        time.sleep(2.0)
+                        bag_after_tmp = {}
+                        try:
+                            bag_after_tmp = build_bag_snapshot(client.get_bag_list())
+                            u2 = client.get_user_info()
+                            total_clicks = u2.get("total_click_count", total_clicks)
+                            total_consume = u2.get("total_click_consume", total_consume)
+                            left_ts = merge_chest_ts(left_ts, u2.get("left_treasure_chest"))
+                            right_ts = merge_chest_ts(right_ts, u2.get("right_treasure_chest"))
+                        except Exception:
+                            pass
+                        diff_item = None
+                        for k, curr in bag_after_tmp.items():
+                            prev = bag_before.get(k)
+                            if prev is None or curr.get("quantity", 0) > prev.get("quantity", 0):
+                                diff_item = curr
+                                break
+                        if diff_item:
+                            res = {
+                                "code": 0,
+                                "data": {
+                                    "asset_id": diff_item.get("asset_id"),
+                                    "asset_name": diff_item.get("asset_name", "Unknown"),
+                                    "asset_type": diff_item.get("asset_type", ""),
+                                    "rarity_type": diff_item.get("rarity_type", "common"),
+                                    "click_consume": CHEST_COST,
+                                    "left_next_time": left_ts,
+                                    "right_next_time": right_ts,
+                                },
+                            }
+                        else:
+                            res = {"code": -1, "message": cdp_res.get("detail", "CDP click sent, no response captured")}
+                    elif st_code == "api_error":
+                        res = cdp_res.get("response") or {"code": -1, "message": cdp_res.get("detail", "CDP API error")}
+                    else:
+                        res = {"code": -1, "message": f"CDP error: {cdp_res.get('detail', 'unknown')}"}
+                else:
+                    # Clean Headless API Mode (Pet is closed or --no-sync): NEVER fabricate fake clicks!
+                    current_balance = total_clicks - total_consume
+                    if current_balance < CHEST_COST:
+                        update_view(in_place=True, action=f"Low balance ({current_balance:,} < {CHEST_COST:,} clicks) - Waiting")
+                        time.sleep(10)
+                        continue
+
+                    target_click = total_clicks
+                    update_view(action=f"Claiming {place_name} (API)...")
+                    sys.stdout.write(f"\r  {Color.YELLOW}[*] Claiming {place_name}...{' ' * 35}\r")
+                    sys.stdout.flush()
+                    logger.info(f"[API] Claiming {place_name} - Clicks: {target_click:,}...")
+
+                    res = client.open_chest(chest_to_open, target_click)
+                    if client.token != token:
+                        token = client.token
+                        token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
+
+                if res and res.get("code") == 0:
                     claim_failures[chest_to_open] = 0
+                    not_ready_waits[chest_to_open] = 0
+                    last_claim_monotonic = time.monotonic()
                     chest_count += 1
-                    data = res.get("data", {})
+                    data = res.get("data", {}) or {}
+                    asset_id = data.get("asset_id")
                     asset = data.get("asset_name", "Unknown")
+                    asset_type_raw = data.get("asset_type", "")
                     rarity = data.get("rarity_type", "common")
                     consume = data.get("click_consume", CHEST_COST)
 
-                    total_clicks = target_click
-                    total_consume += consume
+                    # Monotonically merge next chest timestamps so cached /user/me never rolls timers backward
+                    left_ts = merge_chest_ts(left_ts, data.get("left_next_time"))
+                    right_ts = merge_chest_ts(right_ts, data.get("right_next_time"))
 
-                    new_left = data.get("left_next_time", 0)
-                    new_right = data.get("right_next_time", 0)
-                    if new_left > 0:
-                        left_ts = new_left
-                    if new_right > 0:
-                        right_ts = new_right
+                    bag_after = {}
+                    try:
+                        u_after = client.get_user_info()
+                        total_clicks = u_after.get("total_click_count", total_clicks)
+                        total_consume = max(total_consume + consume, u_after.get("total_click_consume", 0))
+                        left_ts = merge_chest_ts(left_ts, u_after.get("left_treasure_chest"))
+                        right_ts = merge_chest_ts(right_ts, u_after.get("right_treasure_chest"))
+                    except Exception:
+                        total_consume += consume
 
-                    next_cd = int((new_left if chest_to_open == "left" else new_right) - current_server_ts()) // 1000
+                    try:
+                        bag_after = build_bag_snapshot(client.get_bag_list())
+                    except Exception:
+                        pass
+
+                    is_new, new_qty = evaluate_bag_reward(bag_before, asset_id=asset_id, asset_name=asset, bag_after=bag_after)
+                    next_ts_val = left_ts if chest_to_open == "left" else right_ts
+                    next_cd = int(next_ts_val - current_server_ts()) // 1000
                     last_chest_open_total[chest_to_open] = max(1, next_cd)
                     chest_delays[chest_to_open] = get_chest_delay()
-                    other_chest = "right" if chest_to_open == "left" else "left"
-                    other_ts = right_ts if chest_to_open == "left" else left_ts
-                    this_target = (left_ts if chest_to_open == "left" else right_ts) + (chest_delays[chest_to_open] * 1000)
-                    other_target = other_ts + (chest_delays[other_chest] * 1000)
-                    diff = abs(this_target - other_target) // 1000
-                    if diff < min_chest_interval_sec:
-                        chest_delays[other_chest] += int(min_chest_interval_sec - diff)
-                    time.sleep(min_chest_interval_sec)
 
-                    item_type = "Character" if asset.lower().startswith("role") else ("Accessory" if asset.lower().startswith("accessory") else ("Emote" if asset.lower().startswith("emote") else "Item"))
+                    item_type = classify_asset_type(asset_type_raw, asset)
                     rarity_str = rarity.capitalize() if rarity else "Common"
-                    last_claim_msg = f"{place_name} (+{consume:,} clicks) │ Press [L] for Details"
+                    status_badge = "[NEW]" if is_new is True else (f"[DUP x{new_qty}]" if is_new is False and new_qty else ("[DUP]" if is_new is False else "[CLAIMED]"))
+                    last_claim_msg = f"{place_name} {status_badge} {item_type}: {asset} ({rarity_str})"
 
                     logger.info(
-                        f"SUCCESS #{chest_count}: Claimed {place_name}! Reward: {asset} ({item_type} - {rarity_str}) | "
-                        f"New balance: {total_clicks - total_consume:,} | Raw Data: {data}"
+                        f"SUCCESS #{chest_count} [{claim_mode_used}]: Claimed {place_name}! "
+                        f"{status_badge} {item_type} '{asset}' ({rarity_str}, id={asset_id}) | "
+                        f"Balance: {total_clicks - total_consume:,} | Raw: {data}"
                     )
 
                     send_discord_webhook(
@@ -2070,27 +2531,20 @@ def main():
                         balance=total_clicks - total_consume,
                         left_wait_sec=max(0, int((left_ts - current_server_ts()) / 1000)),
                         right_wait_sec=max(0, int((right_ts - current_server_ts()) / 1000)),
+                        asset_type=asset_type_raw,
+                        is_new=is_new,
+                        quantity=new_qty,
+                        claim_mode=claim_mode_used,
                     )
 
-                    # Đồng bộ tức thì số clicks và giờ rương lên con Pet Desktop qua CDP
-                    if is_app_running():
-                        notify_app_refresh(
-                            gross=total_clicks,
-                            consumed=total_consume,
-                            left_ts=left_ts,
-                            right_ts=right_ts,
-                        )
-
-
-
-                    update_view(override_claim_msg=last_claim_msg, action=f"Successfully claimed {place_name}!", total_duration=last_chest_open_total[chest_to_open])
+                    update_view(override_claim_msg=last_claim_msg, action=f"Claimed {place_name} ({claim_mode_used})", total_duration=last_chest_open_total[chest_to_open], force_mode=True)
                     time.sleep(1)
                     continue
                 else:
-                    err_msg = res.get("message", str(res))
+                    err_msg = (res or {}).get("message", str(res))
                     sys.stdout.write(f"\r  {Color.RED}[!] Failed to claim {place_name}: {err_msg}{' ' * 10}\r")
                     sys.stdout.flush()
-                    logger.warning(f"Failed to claim {place_name}: {err_msg}")
+                    logger.warning(f"Failed to claim {place_name} [{claim_mode_used}]: {err_msg}")
                     claim_failures[chest_to_open] = claim_failures.get(chest_to_open, 0) + 1
                     try:
                         u = client.get_user_info()
@@ -2099,21 +2553,21 @@ def main():
                             token_str = f"{token[:8]}...{token[-8:]} - Auto-Refreshed"
                         total_clicks = u.get("total_click_count", total_clicks)
                         total_consume = u.get("total_click_consume", total_consume)
-                        left_ts = u.get("left_treasure_chest", left_ts)
-                        right_ts = u.get("right_treasure_chest", right_ts)
+                        left_ts = merge_chest_ts(left_ts, u.get("left_treasure_chest"))
+                        right_ts = merge_chest_ts(right_ts, u.get("right_treasure_chest"))
                     except Exception:
                         pass
 
                     if claim_failures[chest_to_open] >= 3:
                         logger.warning(f"Repeated failures for {place_name} - Adding 30s cooldown buffer...")
                         if chest_to_open == "left":
-                            left_ts = now + 30000
+                            left_ts = max(left_ts, int(now + 30000))
                         else:
-                            right_ts = now + 30000
+                            right_ts = max(right_ts, int(now + 30000))
                         chest_delays[chest_to_open] = get_chest_delay()
                         claim_failures[chest_to_open] = 0
 
-                    update_view()
+                    update_view(force_mode=True)
                     time.sleep(2)
                     continue
 

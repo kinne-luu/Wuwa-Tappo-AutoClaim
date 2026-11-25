@@ -1,7 +1,8 @@
 # Sensitive & Configuration
 config.json
 *.log
-auto_claim.log
+auto_claim.log*
+DEBUG_ANALYSIS.md
 
 # Build & Binaries
 build/
