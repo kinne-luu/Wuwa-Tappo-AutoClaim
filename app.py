@@ -2946,13 +2946,17 @@ def main():
                     pet_state = get_pet_live_state()
                     if pet_state:
                         st = pet_state.get("store") or {}
-                        if st:
+                        if st and st.get("isLoggedIn"):
                             left_ts = merge_chest_ts(left_ts, st.get("leftTs"))
                             right_ts = merge_chest_ts(right_ts, st.get("rightTs"))
                             if st.get("totalClickCount", 0) < CHEST_COST:
                                 update_view(in_place=True, action=f"Low balance ({st.get('totalClickCount', 0):,} < {CHEST_COST:,} clicks)")
                                 time.sleep(5)
                                 continue
+                        elif (total_clicks - total_consume) < CHEST_COST:
+                            update_view(in_place=True, action=f"Low balance ({total_clicks - total_consume:,} < {CHEST_COST:,} clicks)")
+                            time.sleep(5)
+                            continue
 
                         l_ready = bool(pet_state.get("leftReady"))
                         r_ready = bool(pet_state.get("rightReady"))
