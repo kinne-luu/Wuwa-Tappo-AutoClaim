@@ -101,7 +101,8 @@ CA_BUNDLE_PATH = init_ssl_ca_bundle()
 
 PROJECT_NAME = "WuwaTappo AutoClaim"
 PROJECT_AUTHOR = "kinne-luu"
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.1.2"
+GITHUB_REPO = "kinne-luu/Wuwa-Tappo-AutoClaim"
 
 
 if getattr(sys, "frozen", False):
@@ -150,6 +151,7 @@ farm_max_balance = 0
 idle_farm_status = "OFF (Press [F] to Enable)"
 is_claiming_chest = False
 live_balance_ref = {"total_clicks": 0, "total_consume": 0}
+update_notice = ""
 
 # Session & Lifetime Statistics
 _stats_lock = threading.Lock()
@@ -1662,6 +1664,32 @@ def refresh_collection_state(client: WuwaTappoClient, bag_items: list = None, fe
         collection_state["owned_by_type"] = ow_by_type
 
 
+def _parse_semver(ver_str: str) -> tuple:
+    nums = re.findall(r"\d+", str(ver_str or ""))
+    return tuple(int(x) for x in nums[:3]) if nums else (0,)
+
+
+def check_github_update():
+    """Check GitHub Releases once on startup; non-blocking and silent on network error."""
+    global update_notice
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        req_kwargs = {"timeout": 4, "headers": {"Accept": "application/vnd.github+json", "User-Agent": PROJECT_NAME}}
+        if CA_BUNDLE_PATH and os.path.exists(CA_BUNDLE_PATH):
+            req_kwargs["verify"] = CA_BUNDLE_PATH
+        r = requests.get(url, **req_kwargs)
+        if r.status_code != 200:
+            return
+        data = r.json()
+        tag = str(data.get("tag_name") or "").strip()
+        html_url = str(data.get("html_url") or f"https://github.com/{GITHUB_REPO}/releases/latest").strip()
+        if tag and _parse_semver(tag) > _parse_semver(APP_VERSION):
+            update_notice = f"New version available ({tag}) -> {html_url}"
+            logger.info(f"Update check: {update_notice}")
+    except Exception:
+        pass
+
+
 def format_duration(seconds: int) -> str:
 
     m, s = divmod(max(0, int(seconds)), 60)
@@ -2515,6 +2543,8 @@ def build_dashboard_lines(
     lines.append(f"  {dots}")
     lines.append(f"  \033[38;5;117mc( ^. .^){c.RESET} \033[38;5;218m« Zani is working hard diligently! (˶ᵔ ᵕ ᵔ˶){c.RESET}")
     lines.append(f"  {c.PASTEL_GRAY}[F] Idle Farm   [T] Stats   [S] Settings   [L] Logs   [H] Hide   [Q] Quit{c.RESET}")
+    if update_notice:
+        lines.append(f"  {c.PASTEL_YELLOW}[!] {update_notice}{c.RESET}")
     lines.append("")
 
     return lines
@@ -2702,6 +2732,7 @@ def main():
     client = WuwaTappoClient(token, cid)
 
     init_tray()
+    threading.Thread(target=check_github_update, daemon=True).start()
     if os.name == "nt":
         threading.Thread(target=window_monitor_loop, daemon=True).start()
         threading.Thread(target=console_input_loop, daemon=True).start()
