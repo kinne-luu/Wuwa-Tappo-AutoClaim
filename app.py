@@ -101,7 +101,7 @@ CA_BUNDLE_PATH = init_ssl_ca_bundle()
 
 PROJECT_NAME = "WuwaTappo AutoClaim"
 PROJECT_AUTHOR = "kinne-luu"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.2"
 
 
 if getattr(sys, "frozen", False):
