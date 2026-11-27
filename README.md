@@ -10,13 +10,13 @@
 
 ## Tiếng Việt
 
-Tool tự động nhận rương cho **Wuwa Tappo** trên Windows. Chạy trong terminal, có thể thu xuống khay hệ thống, dùng chung được lúc đang mở pet trên màn hình mà không bị văng lỗi.
+Tool autoclaim rương cho wuwa tappo, mấy ông có thể bật cả game cả tool mà ko lo bị lỗi.
 
 ### Tính năng
 - Tự nhận tài khoản đang đăng nhập trong Wuwa Tappo, không cần lấy thông tin thủ công.
-- Tự canh giờ mở cả 2 rương với độ trễ ngẫu nhiên, báo rõ món nhận được là mới hay trùng.
-- Có chế độ tự gõ tích điểm khi máy để không, chạm lại chuột hoặc bàn phím là tự dừng.
-- Xem tiến độ sưu tập, lịch sử nhận rương và gửi thông báo qua Discord (nếu bật).
+- Tự canh giờ mở cả 2 rương với độ trễ ngẫu nhiên.
+- Có chế độ autocfarm khi máy để không, chạm lại chuột hoặc bàn phím là tự dừng.
+- Xem tiến, lịch sử nhận rương và gửi thông báo qua Discord (nếu mấy ông bật discord webhook).
 - Đổi cài đặt ngay khi đang chạy, không cần tắt mở lại.
 
 ### Cách dùng
@@ -48,39 +48,39 @@ Muốn tự đóng gói thành `.exe` thì chạy `build.bat`, file tạo ra là
 
 ## English
 
-Auto-claim tool for **Wuwa Tappo** on Windows. Runs in the terminal, minimizes to the system tray, and works alongside the desktop pet without causing errors.
+Chest auto-claim tool for Wuwa Tappo — you can run both the game and the tool at the same time without worrying about errors.
 
 ### Features
-- Picks up your logged-in account from Wuwa Tappo automatically.
-- Opens both chests on time with random delays and shows whether drops are new or duplicates.
-- Optional idle click farming when you're away from the PC (stops right away when you move the mouse or type).
-- Tracks collection progress, drop history, and supports Discord notifications.
-- Change settings on the fly without restarting.
+- Automatically detects your logged-in Wuwa Tappo account, no manual setup required.
+- Automatically times and opens both chests with random delays.
+- Includes an auto-farm mode when your PC is idle; stops automatically as soon as you move the mouse or press a key.
+- View progress, chest claim history, and send notifications via Discord (if you enable Discord webhook).
+- Change settings on the fly while running, no restart needed.
 
 ### Usage
-Grab the `.exe` from Releases, or install dependencies if running from source:
+Download the pre-built `.exe` from Releases and run it right away, or if running from source, install the dependencies first:
 
     pip install -r requirements.txt
 
-Run with `run.bat` (uses the `.exe` if present, otherwise Python), or:
+Run via `run.bat` (prioritizes the `.exe` if available, otherwise runs Python), or:
 
     python app.py
 
-Optional arguments:
+Some optional launch arguments:
 
     python app.py --status
     python app.py --min-delay 5 --max-delay 30 --interval 15
     python app.py --tray
     python app.py --idle-farm
 
-- `--status`: show account info and exit
-- `--min-delay`, `--max-delay`, `--interval`: adjust claim delays (seconds)
+- `--status`: quickly view account info and exit
+- `--min-delay`, `--max-delay`, `--interval`: adjust chest opening delays (seconds)
 - `--tray`: start minimized in the system tray
-- `--idle-farm`: enable idle click farming on startup
+- `--idle-farm`: enable auto point farming when idle on startup
 
-Hotkeys in the terminal: `F` toggle idle farm, `T` stats, `S` settings, `L` logs, `H` hide to tray, `Q` quit.
+Terminal hotkeys: `F` toggle idle point farming, `T` view stats, `S` settings, `L` view logs, `H` hide to tray, `Q` quit.
 
-To build a standalone `.exe`, run `build.bat`. The output is `WuwaTappoAutoClaim.exe`.
+If you want to build the `.exe` yourself, run `build.bat` — the output file will be `WuwaTappoAutoClaim.exe`.
 
 ---
 
